@@ -22,9 +22,9 @@ dotenv.config({ path: ".env.local" });
 
 // Configuration
 const GRAPH_NAME = "pdf_documents";
-let DEBUG_MODE = false; // Toggle with 'debug' command
-
 const EMBEDDING_MODEL = process.env.DEFAULT_EMBEDDING_MODEL || "text-embedding-3-small";
+
+let AUTO_EXPLAIN = false;
 
 const DEFAULT_QUERY_OPTIONS = {
   similarityTopK: 5,
@@ -111,105 +111,27 @@ const embedModel = {
   },
 };
 
-/**
- * Format results for display
- */
-function formatResults(results: any[]): string {
-  if (results.length === 0) {
-    return "No relevant information found.";
-  }
-  
-  const output: string[] = [];
-  
-  // Group results by document
-  const byDocument = new Map<string, any[]>();
-  for (const result of results) {
-    const docId = result.node.metadata?.documentId || "unknown";
-    if (!byDocument.has(docId)) {
-      byDocument.set(docId, []);
-    }
-    byDocument.get(docId)!.push(result);
-  }
-  
-  // Format each document's results
-  for (const [docId, docResults] of byDocument.entries()) {
-    output.push(`\n📄 From document: ${docId}`);
-    output.push("─".repeat(60));
-    
-    // Show top 3 results from this document
-    for (const result of docResults.slice(0, 3)) {
-      const score = result.score?.toFixed(3) || "N/A";
-      const text = result.node.text.trim();
-      const preview = text.length > 300 ? text.slice(0, 300) + "..." : text;
-      
-      output.push(`\n[Relevance: ${score}]`);
-      output.push(preview);
-    }
-  }
-  
-  return output.join("\n");
-}
-
-function selectContextResults(query: string, results: any[]): any[] {
-  const maxContextItems = 14;
-  const q = query.toLowerCase();
-
-  const keywords: string[] = [];
-  if (q.includes("migrat") || q.includes("move") || q.includes("transition") || q.includes("options")) {
-    keywords.push(
-      "system conversion",
-      "selective",
-      "selective data",
-      "new implementation",
-      "new implementation",
-      "greenfield",
-      "brownfield",
-      "upgrade"
-    );
-  }
-
-  const selected: any[] = [];
-  const seen = new Set<string>();
-
-  const add = (r: any) => {
-    const id = r?.node?.id ?? r?.node?.metadata?.id ?? r?.node?.metadata?.chunkIndex ?? JSON.stringify(r?.node?.metadata ?? {});
-    const key = String(id);
-    if (!seen.has(key)) {
-      seen.add(key);
-      selected.push(r);
-    }
-  };
-
-  for (const r of results.slice(0, 8)) add(r);
-
-  if (keywords.length > 0) {
-    for (const r of results) {
-      if (selected.length >= maxContextItems) break;
-      const text = (r?.node?.text ?? "").toLowerCase();
-      if (keywords.some((k) => text.includes(k))) {
-        add(r);
-      }
-    }
-  }
-
-  for (const r of results) {
-    if (selected.length >= maxContextItems) break;
-    add(r);
-  }
-
-  return selected;
-}
-
-function isNoisyTripletText(text: string): boolean {
-  const t = (text ?? "").toLowerCase();
+function shouldDropContextLine(line: string): boolean {
+  const t = (line ?? "").toLowerCase();
   if (!t) return true;
-  if (t.includes("urn:hkv:prop:")) return true;
-  if (t.includes("rdf-syntax-ns#type")) return true;
-  if (t.includes("triplet_source_id")) return true;
-  if (t.includes("documentid")) return true;
-  if (t.includes("from_document")) return true;
-  if (t.includes("source]->")) return true;
-  return false;
+  return (
+    t.includes("urn:hkv:prop:") ||
+    t.includes("rdf-syntax-ns#type") ||
+    t.includes("triplet_source_id") ||
+    t.includes("documentid") ||
+    t.includes("from_document")
+  );
+}
+
+function sanitizeContextText(text: string): string {
+  // The retriever often returns a combined string:
+  //  - preamble
+  //  - KG triplets (some noisy metadata)
+  //  - original chunk text
+  // We want to keep semantic triplets + chunk text, but drop metadata lines.
+  const lines = (text ?? "").split("\n");
+  const kept = lines.filter((l) => !shouldDropContextLine(l));
+  return kept.join("\n").trim();
 }
 
 /**
@@ -220,12 +142,15 @@ async function generateResponse(query: string, results: any[]): Promise<string> 
     return "I don't have enough information in the uploaded documents to answer that question.";
   }
   
-  const filteredResults = results.filter((r) => !isNoisyTripletText(r?.node?.text ?? ""));
-  const contextResults = selectContextResults(query, filteredResults);
+  const contextResults = results.slice(0, 8);
 
   // Build context from selected results
   const context = contextResults
-    .map((r, i) => `[${i + 1}] ${r.node.text}`)
+    .map((r, i) => {
+      const raw = String(r?.node?.text ?? "");
+      const cleaned = sanitizeContextText(raw);
+      return `[${i + 1}] ${cleaned}`;
+    })
     .join("\n\n");
   
   const systemPrompt = `You are a helpful assistant that answers questions based only on the provided document context.
@@ -413,11 +338,14 @@ async function main() {
   console.log("💬 Chat started! Ask questions about your uploaded documents.");
   console.log("   Commands: 'exit' or 'quit' to exit, 'help' for options");
   console.log("=".repeat(70) + "\n");
+
+  let lastQuestion: string | null = null;
   
   // Chat loop
   const askQuestion = () => {
     rl.question("You: ", async (input) => {
       const query = input.trim();
+      const queryLower = query.toLowerCase();
       
       if (!query) {
         askQuestion();
@@ -425,32 +353,58 @@ async function main() {
       }
       
       // Handle commands
-      if (query.toLowerCase() === "exit" || query.toLowerCase() === "quit") {
+      if (queryLower === "exit" || queryLower === "quit") {
         console.log("\n👋 Goodbye!\n");
         rl.close();
         process.exit(0);
         return;
       }
       
-      if (query.toLowerCase() === "help") {
+      if (queryLower === "help") {
         console.log("\n📖 Available commands:");
         console.log("   - Ask any question about your documents");
         console.log("   - 'exit' or 'quit' - Exit the chat");
         console.log("   - 'help' - Show this help message");
-        console.log("   - 'debug' - Toggle debug mode (show retrieved chunks)\n");
-        console.log("   - 'explain <question>' - Show KG-RAG retrieval internals for a question\n");
-        askQuestion();
-        return;
-      }
-      
-      if (query.toLowerCase() === "debug") {
-        DEBUG_MODE = !DEBUG_MODE;
-        console.log(`\n🔧 Debug mode: ${DEBUG_MODE ? "ON" : "OFF"}\n`);
+        console.log("   - 'explain <question>' - Show KG-RAG retrieval internals for a question");
+        console.log("   - 'explain-last' - Explain the previous question\n");
+        console.log("   - 'auto-explain' - Toggle showing KG-RAG debug for every question\n");
         askQuestion();
         return;
       }
 
-      if (query.toLowerCase().startsWith("explain ")) {
+      if (queryLower === "auto-explain") {
+        AUTO_EXPLAIN = !AUTO_EXPLAIN;
+        console.log(`\n🔧 Auto-explain: ${AUTO_EXPLAIN ? "ON" : "OFF"}\n`);
+        askQuestion();
+        return;
+      }
+
+      if (queryLower === "explain-last") {
+        if (!lastQuestion) {
+          console.log("\nNo previous question to explain yet.\n");
+          askQuestion();
+          return;
+        }
+        try {
+          await explainRetrieval(lastQuestion, graphStore, DEFAULT_QUERY_OPTIONS);
+          console.log("🤖 Assistant: ");
+          const results = await index.query(lastQuestion, {
+            similarityTopK: DEFAULT_QUERY_OPTIONS.similarityTopK,
+            pathDepth: DEFAULT_QUERY_OPTIONS.pathDepth,
+            limit: DEFAULT_QUERY_OPTIONS.limit,
+            crossCheckBoost: DEFAULT_QUERY_OPTIONS.crossCheckBoost,
+            crossCheckBoostFactor: DEFAULT_QUERY_OPTIONS.crossCheckBoostFactor,
+          });
+          const response = await generateResponse(lastQuestion, results);
+          console.log(response);
+        } catch (error: any) {
+          console.error("\n❌ Explain error:", error.message);
+        }
+        askQuestion();
+        return;
+      }
+
+      if (queryLower.startsWith("explain ")) {
         const explainQuery = query.slice("explain ".length).trim();
         if (!explainQuery) {
           console.log("\nUsage: explain <your question>\n");
@@ -481,6 +435,12 @@ async function main() {
       try {
         // Query the knowledge graph
         console.log("\n🔍 Searching...");
+
+        lastQuestion = query;
+
+        if (AUTO_EXPLAIN) {
+          await explainRetrieval(query, graphStore, DEFAULT_QUERY_OPTIONS);
+        }
         
         const results = await index.query(query, {
           similarityTopK: DEFAULT_QUERY_OPTIONS.similarityTopK,
@@ -491,17 +451,6 @@ async function main() {
         });
         
         console.log(`   Found ${results.length} relevant passages\n`);
-        
-        // Debug: show retrieved chunks
-        if (DEBUG_MODE && results.length > 0) {
-          console.log("📋 Retrieved chunks (debug):");
-          results.slice(0, 10).forEach((r, i) => {
-            const score = r.score?.toFixed(3) || "N/A";
-            const text = r.node.text?.slice(0, 150).replace(/\n/g, " ") || "";
-            console.log(`   [${i + 1}] score=${score}: ${text}...`);
-          });
-          console.log();
-        }
         
         // Generate AI response
         console.log("🤖 Assistant: ");
