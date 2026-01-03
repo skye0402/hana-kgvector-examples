@@ -12,8 +12,8 @@ importers:
         specifier: 2.27.19
         version: 2.27.19
       hana-kgvector:
-        specifier: ^0.1.5
-        version: 0.1.5
+        specifier: ^0.1.6
+        version: 0.1.6
       openai:
         specifier: ^4.104.0
         version: 4.104.0(zod@3.25.76)
@@ -312,8 +312,8 @@ packages:
     resolution: {integrity: sha512-ZUKRh6/kUFoAiTAtTYPZJ3hw9wNxx+BIBOijnlG9PnrJsCcSjs1wyyD6vJpaYtgnzDrKYRSqf3OO6Rfa93xsRg==}
     engines: {node: '>= 0.4'}
 
-  hana-kgvector@0.1.5:
-    resolution: {integrity: sha512-SAzWKkG8c89+vugsQOjdlL86qDuDmmJHfYtYPeCAyIO6QiNuONFUZ9PE3a2EQYGzkDScjhiBmDVJ0/VTSq+ZeQ==}
+  hana-kgvector@0.1.6:
+    resolution: {integrity: sha512-JtBJNmjq2ujd8cGGQAmnkzw1F9agucxP6OK/5L39t0CrDSC3DDCHUJesY4ezTQKiTrnmhL6AeWULeay61mmnzA==}
 
   has-symbols@1.1.0:
     resolution: {integrity: sha512-1cDNdwJ2Jaohmb3sg4OmKaMBwuC48sYni5HUw2DvsC8LjGTLK9h+eb1X6RyuOHe4hT0ULCW68iomhjUoKUqlPQ==}
@@ -642,7 +642,7 @@ snapshots:
 
   gopd@1.2.0: {}
 
-  hana-kgvector@0.1.5:
+  hana-kgvector@0.1.6:
     dependencies:
       openai: 4.104.0(zod@3.25.76)
       zod: 3.25.76

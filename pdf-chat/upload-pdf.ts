@@ -33,7 +33,12 @@ const CHUNK_OVERLAP = 100;
 const SCHEMA_SAMPLE_SIZE = 15000; // ~5 pages for schema induction
 const AUTO_DISCOVER_SCHEMA = true; // Set to false to use hardcoded schema
 const HUMAN_REVIEW = false; // Set to true to prompt for schema approval
-const TRIPLETS_PER_CHUNK_CAP: number | undefined = undefined; // Set e.g. to 15 to cap; undefined = no cap
+const RESET_TABLES = true;
+// maxTripletsPerChunk is a PROMPT HINT, not a hard cap!
+// - Low values (10-15): LLM tries to hit exactly that number (inflates extraction)
+// - High values (100+): LLM extracts naturally without artificial inflation
+// - Library default is 10, which causes uniform "10 triplets per chunk"
+const TRIPLETS_PER_CHUNK: number = 100; // Use high value for natural extraction
 
 // Initialize OpenAI client
 const openai = new OpenAI({
@@ -67,13 +72,30 @@ const embedModel = {
         
         const b64 = response.data[0].embedding as unknown as string;
         const buffer = Buffer.from(b64, "base64");
-        const float32Array = new Float32Array(buffer.buffer);
+        if (buffer.byteLength % 4 !== 0) {
+          throw new Error(`Invalid base64 embedding byteLength=${buffer.byteLength} (not divisible by 4)`);
+        }
+
+        // IMPORTANT: Buffer is a view into an ArrayBuffer. Respect byteOffset/byteLength.
+        const float32Array = new Float32Array(
+          buffer.buffer,
+          buffer.byteOffset,
+          buffer.byteLength / 4
+        );
+        const embedding = Array.from(float32Array);
+        
+        // Validate embedding - check for null/NaN/Infinity values
+        const hasInvalidValues = embedding.some(v => v === null || !Number.isFinite(v));
+        if (hasInvalidValues) {
+          console.log(`   [Embed #${currentCount}] ⚠️ Invalid values in embedding, retrying...`);
+          throw new Error("Embedding contains invalid values (null/NaN/Infinity)");
+        }
         
         if (VERBOSE_EMBED_LOG) {
           const truncatedText = text.length > 40 ? text.slice(0, 40) + "..." : text;
-          console.log(`   [Embed #${currentCount}] "${truncatedText}" → ${float32Array.length}d`);
+          console.log(`   [Embed #${currentCount}] "${truncatedText}" → ${embedding.length}d`);
         }
-        return Array.from(float32Array);
+        return embedding;
       } catch (error: any) {
         lastError = error;
         if (attempt < MAX_RETRIES) {
@@ -352,6 +374,7 @@ async function main() {
   console.log(`\n🗄️  Initializing graph store (graph: ${GRAPH_NAME})`);
   const graphStore = new HanaPropertyGraphStore(conn, {
     graphName: GRAPH_NAME,
+    resetTables: RESET_TABLES,
   });
   
   // 5. Schema Induction: Discover or use default schema
@@ -378,9 +401,7 @@ async function main() {
       new SchemaLLMPathExtractor({
         llm: llmClient,
         schema,
-        ...(TRIPLETS_PER_CHUNK_CAP !== undefined
-          ? { maxTripletsPerChunk: TRIPLETS_PER_CHUNK_CAP }
-          : {}),
+        maxTripletsPerChunk: TRIPLETS_PER_CHUNK,
         strict: false, // Allow relations not in validationSchema
       }),
       new ImplicitPathExtractor(),

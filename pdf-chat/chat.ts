@@ -12,6 +12,7 @@ import {
   HanaPropertyGraphStore,
   PropertyGraphIndex,
   ImplicitPathExtractor,
+  KG_SOURCE_REL,
 } from "hana-kgvector";
 import OpenAI from "openai";
 import dotenv from "dotenv";
@@ -21,6 +22,15 @@ dotenv.config({ path: ".env.local" });
 
 // Configuration
 const GRAPH_NAME = "pdf_documents";
+let DEBUG_MODE = false; // Toggle with 'debug' command
+
+const DEFAULT_QUERY_OPTIONS = {
+  similarityTopK: 5,
+  pathDepth: 2,
+  limit: 30,
+  crossCheckBoost: true,
+  crossCheckBoostFactor: 1.25,
+};
 
 // Initialize OpenAI client
 const openai = new OpenAI({
@@ -28,19 +38,57 @@ const openai = new OpenAI({
   baseURL: process.env.LITELLM_PROXY_URL,
 });
 
+const MAX_RETRIES = 3;
+const RETRY_DELAY_MS = 2000;
+
+async function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 // Embedding model wrapper
 const embedModel = {
   async getTextEmbedding(text: string): Promise<number[]> {
-    const response = await openai.embeddings.create({
-      model: process.env.DEFAULT_EMBEDDING_MODEL || "text-embedding-3-small",
-      input: text,
-      encoding_format: "base64",
-    });
-    
-    const b64 = response.data[0].embedding as unknown as string;
-    const buffer = Buffer.from(b64, "base64");
-    const float32Array = new Float32Array(buffer.buffer);
-    return Array.from(float32Array);
+    let lastError: Error | null = null;
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        const response = await openai.embeddings.create({
+          model: process.env.DEFAULT_EMBEDDING_MODEL || "text-embedding-3-small",
+          input: text,
+          encoding_format: "base64",
+        });
+
+        const b64 = response.data[0].embedding as unknown as string;
+        const buffer = Buffer.from(b64, "base64");
+
+        if (buffer.byteLength % 4 !== 0) {
+          throw new Error(`Invalid base64 embedding byteLength=${buffer.byteLength} (not divisible by 4)`);
+        }
+
+        // IMPORTANT: Buffer is a view into an ArrayBuffer. Respect byteOffset/byteLength.
+        const float32Array = new Float32Array(
+          buffer.buffer,
+          buffer.byteOffset,
+          buffer.byteLength / 4
+        );
+        const embedding = Array.from(float32Array);
+
+        const hasInvalidValues = embedding.some((v) => v === null || !Number.isFinite(v));
+        if (hasInvalidValues) {
+          throw new Error("Embedding contains invalid values (null/NaN/Infinity)");
+        }
+
+        return embedding;
+      } catch (error: any) {
+        lastError = error;
+        if (attempt < MAX_RETRIES) {
+          const delay = RETRY_DELAY_MS * attempt;
+          console.log(`   [Embed] ⚠️ Retry ${attempt}/${MAX_RETRIES} after ${delay}ms`);
+          await sleep(delay);
+        }
+      }
+    }
+
+    throw lastError;
   },
   
   async getTextEmbeddingBatch(texts: string[]): Promise<number[][]> {
@@ -87,6 +135,56 @@ function formatResults(results: any[]): string {
   return output.join("\n");
 }
 
+function selectContextResults(query: string, results: any[]): any[] {
+  const maxContextItems = 14;
+  const q = query.toLowerCase();
+
+  const keywords: string[] = [];
+  if (q.includes("migrat") || q.includes("move") || q.includes("transition") || q.includes("options")) {
+    keywords.push(
+      "system conversion",
+      "selective",
+      "selective data",
+      "new implementation",
+      "new implementation",
+      "greenfield",
+      "brownfield",
+      "upgrade"
+    );
+  }
+
+  const selected: any[] = [];
+  const seen = new Set<string>();
+
+  const add = (r: any) => {
+    const id = r?.node?.id ?? r?.node?.metadata?.id ?? r?.node?.metadata?.chunkIndex ?? JSON.stringify(r?.node?.metadata ?? {});
+    const key = String(id);
+    if (!seen.has(key)) {
+      seen.add(key);
+      selected.push(r);
+    }
+  };
+
+  for (const r of results.slice(0, 8)) add(r);
+
+  if (keywords.length > 0) {
+    for (const r of results) {
+      if (selected.length >= maxContextItems) break;
+      const text = (r?.node?.text ?? "").toLowerCase();
+      if (keywords.some((k) => text.includes(k))) {
+        add(r);
+      }
+    }
+  }
+
+  for (const r of results) {
+    if (selected.length >= maxContextItems) break;
+    add(r);
+  }
+
+  return selected;
+}
+
 /**
  * Generate AI response using retrieved context
  */
@@ -95,15 +193,17 @@ async function generateResponse(query: string, results: any[]): Promise<string> 
     return "I don't have enough information in the uploaded documents to answer that question.";
   }
   
-  // Build context from top results
-  const context = results
-    .slice(0, 5)
+  const contextResults = selectContextResults(query, results);
+
+  // Build context from selected results
+  const context = contextResults
     .map((r, i) => `[${i + 1}] ${r.node.text}`)
     .join("\n\n");
   
-  const systemPrompt = `You are a helpful assistant that answers questions based on the provided document context. 
-Use only the information from the context to answer questions. If the context doesn't contain enough information, say so.
-Be concise and accurate.`;
+  const systemPrompt = `You are a helpful assistant that answers questions based only on the provided document context.
+If the user asks for a list of "options", "types", or "ways", enumerate ALL options that appear in the context.
+Do not omit options that are present.
+If an option is not present in the context, say it is not present.`;
   
   const userPrompt = `Context from documents:
 ${context}
@@ -122,6 +222,106 @@ Answer:`;
   });
   
   return response.choices[0]?.message?.content || "Unable to generate response.";
+}
+
+async function explainRetrieval(
+  query: string,
+  graphStore: any,
+  options: typeof DEFAULT_QUERY_OPTIONS
+): Promise<void> {
+  console.log("\n🧪 Explain KG-RAG (debug)");
+  console.log(`   Query: ${query}`);
+  console.log(
+    `   Options: similarityTopK=${options.similarityTopK}, pathDepth=${options.pathDepth}, limit=${options.limit}, crossCheckBoost=${options.crossCheckBoost}, crossCheckBoostFactor=${options.crossCheckBoostFactor}`
+  );
+
+  const embedding = await embedModel.getTextEmbedding(query);
+  console.log(`   Query embedding dim: ${embedding.length}`);
+
+  const [kgNodes, scores] = await graphStore.vectorQuery({
+    queryEmbedding: embedding,
+    similarityTopK: options.similarityTopK,
+  });
+
+  console.log(`\n🔎 Vector-matched KG nodes (top ${options.similarityTopK}):`);
+  if (!kgNodes || kgNodes.length === 0) {
+    console.log("   (none)");
+    return;
+  }
+  kgNodes.forEach((n: any, i: number) => {
+    const s = scores?.[i];
+    const label = n?.label ?? "?";
+    const name = n?.name ?? n?.id ?? "?";
+    const docId = n?.properties?.documentId;
+    const sourceChunk = n?.properties?.sourceChunk;
+    console.log(
+      `   [${i + 1}] score=${typeof s === "number" ? s.toFixed(3) : "N/A"} label=${label} name=${name} docId=${docId ?? "-"} sourceChunk=${sourceChunk ?? "-"}`
+    );
+  });
+
+  const provenanceSet = new Set<string>();
+  if (options.crossCheckBoost) {
+    for (const node of kgNodes) {
+      if (node?.id) provenanceSet.add(String(node.id).toLowerCase());
+      if (node?.name) provenanceSet.add(String(node.name).toLowerCase());
+      const props = node?.properties ?? {};
+      if (props.documentId) provenanceSet.add(String(props.documentId).toLowerCase());
+      if (props.sourceChunk) provenanceSet.add(String(props.sourceChunk).toLowerCase());
+    }
+  }
+
+  const triplets = await graphStore.getRelMap({
+    nodes: kgNodes,
+    depth: options.pathDepth,
+    limit: options.limit,
+    ignoreRels: [KG_SOURCE_REL],
+  });
+
+  console.log(`\n🧭 Expanded triplets (depth=${options.pathDepth}, limit=${options.limit}): ${triplets.length}`);
+  const kgIds = kgNodes.map((n: any) => n.id);
+  const scoredTriplets = (triplets as any[]).map((t: any) => {
+    const idx1 = kgIds.indexOf(t[0]?.id);
+    const idx2 = kgIds.indexOf(t[2]?.id);
+    const score1 = idx1 >= 0 ? scores[idx1] : 0;
+    const score2 = idx2 >= 0 ? scores[idx2] : 0;
+    const base = Math.max(score1 ?? 0, score2 ?? 0);
+
+    let boosted = base;
+    let boostedReason: string | null = null;
+    if (options.crossCheckBoost && boosted > 0) {
+      const s = t[0];
+      const o = t[2];
+      const shouldBoost =
+        (s?.properties?.documentId && provenanceSet.has(String(s.properties.documentId).toLowerCase())) ||
+        (s?.properties?.sourceChunk && provenanceSet.has(String(s.properties.sourceChunk).toLowerCase())) ||
+        (o?.properties?.documentId && provenanceSet.has(String(o.properties.documentId).toLowerCase())) ||
+        (o?.properties?.sourceChunk && provenanceSet.has(String(o.properties.sourceChunk).toLowerCase())) ||
+        (s?.id && provenanceSet.has(String(s.id).toLowerCase())) ||
+        (s?.name && provenanceSet.has(String(s.name).toLowerCase())) ||
+        (o?.id && provenanceSet.has(String(o.id).toLowerCase())) ||
+        (o?.name && provenanceSet.has(String(o.name).toLowerCase()));
+
+      if (shouldBoost) {
+        boosted = Math.min(1, boosted * options.crossCheckBoostFactor);
+        boostedReason = "provenance match";
+      }
+    }
+
+    return { triplet: t, baseScore: base, score: boosted, boostedReason };
+  });
+
+  scoredTriplets.sort((a, b) => b.score - a.score);
+  for (const [i, r] of scoredTriplets.slice(0, 20).entries()) {
+    const [s, p, o] = r.triplet;
+    const subj = `${s?.label ?? "?"}:${s?.name ?? s?.id ?? "?"}`;
+    const pred = p?.label ?? p?.id ?? "?";
+    const obj = `${o?.label ?? "?"}:${o?.name ?? o?.id ?? "?"}`;
+    const boostNote = r.boostedReason ? ` boosted(${r.boostedReason})` : "";
+    console.log(
+      `   [${i + 1}] score=${r.score.toFixed(3)} base=${r.baseScore.toFixed(3)}${boostNote} :: ${subj} -[${pred}]-> ${obj}`
+    );
+  }
+  console.log();
 }
 
 async function main() {
@@ -188,7 +388,31 @@ async function main() {
         console.log("   - Ask any question about your documents");
         console.log("   - 'exit' or 'quit' - Exit the chat");
         console.log("   - 'help' - Show this help message");
-        console.log("   - 'raw' - Toggle raw results display\n");
+        console.log("   - 'debug' - Toggle debug mode (show retrieved chunks)\n");
+        console.log("   - 'explain <question>' - Show KG-RAG retrieval internals for a question\n");
+        askQuestion();
+        return;
+      }
+      
+      if (query.toLowerCase() === "debug") {
+        DEBUG_MODE = !DEBUG_MODE;
+        console.log(`\n🔧 Debug mode: ${DEBUG_MODE ? "ON" : "OFF"}\n`);
+        askQuestion();
+        return;
+      }
+
+      if (query.toLowerCase().startsWith("explain ")) {
+        const explainQuery = query.slice("explain ".length).trim();
+        if (!explainQuery) {
+          console.log("\nUsage: explain <your question>\n");
+          askQuestion();
+          return;
+        }
+        try {
+          await explainRetrieval(explainQuery, graphStore, DEFAULT_QUERY_OPTIONS);
+        } catch (error: any) {
+          console.error("\n❌ Explain error:", error.message);
+        }
         askQuestion();
         return;
       }
@@ -198,13 +422,25 @@ async function main() {
         console.log("\n🔍 Searching...");
         
         const results = await index.query(query, {
-          similarityTopK: 5,
-          pathDepth: 2,
-          limit: 30,
-          crossCheckBoost: true,
+          similarityTopK: DEFAULT_QUERY_OPTIONS.similarityTopK,
+          pathDepth: DEFAULT_QUERY_OPTIONS.pathDepth,
+          limit: DEFAULT_QUERY_OPTIONS.limit,
+          crossCheckBoost: DEFAULT_QUERY_OPTIONS.crossCheckBoost,
+          crossCheckBoostFactor: DEFAULT_QUERY_OPTIONS.crossCheckBoostFactor,
         });
         
         console.log(`   Found ${results.length} relevant passages\n`);
+        
+        // Debug: show retrieved chunks
+        if (DEBUG_MODE && results.length > 0) {
+          console.log("📋 Retrieved chunks (debug):");
+          results.slice(0, 10).forEach((r, i) => {
+            const score = r.score?.toFixed(3) || "N/A";
+            const text = r.node.text?.slice(0, 150).replace(/\n/g, " ") || "";
+            console.log(`   [${i + 1}] score=${score}: ${text}...`);
+          });
+          console.log();
+        }
         
         // Generate AI response
         console.log("🤖 Assistant: ");
