@@ -1,0 +1,24 @@
+{
+  "name": "pdf-chat-example",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Example: PDF upload and chat query using hana-kgvector",
+  "scripts": {
+    "upload": "tsx upload-pdf.ts",
+    "chat": "tsx chat.ts"
+  },
+  "dependencies": {
+    "@sap/hana-client": "2.27.19",
+    "hana-kgvector": "^0.1.4",
+    "openai": "^4.0.0",
+    "pdf-parse": "^1.1.1",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/pdf-parse": "^1.1.4",
+    "dotenv": "^16.4.5",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  }
+}
