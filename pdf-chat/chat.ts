@@ -24,6 +24,8 @@ dotenv.config({ path: ".env.local" });
 const GRAPH_NAME = "pdf_documents";
 let DEBUG_MODE = false; // Toggle with 'debug' command
 
+const EMBEDDING_MODEL = process.env.DEFAULT_EMBEDDING_MODEL || "text-embedding-3-small";
+
 const DEFAULT_QUERY_OPTIONS = {
   similarityTopK: 5,
   pathDepth: 2,
@@ -52,29 +54,42 @@ const embedModel = {
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       try {
         const response = await openai.embeddings.create({
-          model: process.env.DEFAULT_EMBEDDING_MODEL || "text-embedding-3-small",
+          model: EMBEDDING_MODEL,
           input: text,
-          encoding_format: "base64",
+          encoding_format: "float",
         });
 
-        const b64 = response.data[0].embedding as unknown as string;
-        const buffer = Buffer.from(b64, "base64");
+        const rawEmbedding = response.data[0].embedding as unknown;
+        let embedding: number[];
 
-        if (buffer.byteLength % 4 !== 0) {
-          throw new Error(`Invalid base64 embedding byteLength=${buffer.byteLength} (not divisible by 4)`);
+        // Prefer numeric embeddings to avoid any base64/proxy decoding mismatch.
+        if (Array.isArray(rawEmbedding)) {
+          embedding = rawEmbedding as number[];
+        } else if (typeof rawEmbedding === "string") {
+          const buffer = Buffer.from(rawEmbedding, "base64");
+          if (buffer.byteLength % 4 !== 0) {
+            throw new Error(
+              `Invalid base64 embedding byteLength=${buffer.byteLength} (not divisible by 4)`
+            );
+          }
+          const float32Array = new Float32Array(
+            buffer.buffer,
+            buffer.byteOffset,
+            buffer.byteLength / 4
+          );
+          embedding = Array.from(float32Array);
+        } else {
+          throw new Error("Unknown embedding format returned by provider");
         }
-
-        // IMPORTANT: Buffer is a view into an ArrayBuffer. Respect byteOffset/byteLength.
-        const float32Array = new Float32Array(
-          buffer.buffer,
-          buffer.byteOffset,
-          buffer.byteLength / 4
-        );
-        const embedding = Array.from(float32Array);
 
         const hasInvalidValues = embedding.some((v) => v === null || !Number.isFinite(v));
         if (hasInvalidValues) {
           throw new Error("Embedding contains invalid values (null/NaN/Infinity)");
+        }
+
+        const maxAbs = embedding.reduce((m, v) => Math.max(m, Math.abs(v as number)), 0);
+        if (maxAbs > 100) {
+          throw new Error("Embedding magnitude too large; likely decode/format mismatch");
         }
 
         return embedding;
@@ -185,6 +200,18 @@ function selectContextResults(query: string, results: any[]): any[] {
   return selected;
 }
 
+function isNoisyTripletText(text: string): boolean {
+  const t = (text ?? "").toLowerCase();
+  if (!t) return true;
+  if (t.includes("urn:hkv:prop:")) return true;
+  if (t.includes("rdf-syntax-ns#type")) return true;
+  if (t.includes("triplet_source_id")) return true;
+  if (t.includes("documentid")) return true;
+  if (t.includes("from_document")) return true;
+  if (t.includes("source]->")) return true;
+  return false;
+}
+
 /**
  * Generate AI response using retrieved context
  */
@@ -193,7 +220,8 @@ async function generateResponse(query: string, results: any[]): Promise<string> 
     return "I don't have enough information in the uploaded documents to answer that question.";
   }
   
-  const contextResults = selectContextResults(query, results);
+  const filteredResults = results.filter((r) => !isNoisyTripletText(r?.node?.text ?? ""));
+  const contextResults = selectContextResults(query, filteredResults);
 
   // Build context from selected results
   const context = contextResults
@@ -231,6 +259,7 @@ async function explainRetrieval(
 ): Promise<void> {
   console.log("\n🧪 Explain KG-RAG (debug)");
   console.log(`   Query: ${query}`);
+  console.log(`   Embedding model: ${EMBEDDING_MODEL}`);
   console.log(
     `   Options: similarityTopK=${options.similarityTopK}, pathDepth=${options.pathDepth}, limit=${options.limit}, crossCheckBoost=${options.crossCheckBoost}, crossCheckBoostFactor=${options.crossCheckBoostFactor}`
   );
@@ -255,7 +284,7 @@ async function explainRetrieval(
     const docId = n?.properties?.documentId;
     const sourceChunk = n?.properties?.sourceChunk;
     console.log(
-      `   [${i + 1}] score=${typeof s === "number" ? s.toFixed(3) : "N/A"} label=${label} name=${name} docId=${docId ?? "-"} sourceChunk=${sourceChunk ?? "-"}`
+      `   [${i + 1}] score=${typeof s === "number" ? s.toFixed(6) : "N/A"} label=${label} name=${name} docId=${docId ?? "-"} sourceChunk=${sourceChunk ?? "-"}`
     );
   });
 
@@ -277,9 +306,29 @@ async function explainRetrieval(
     ignoreRels: [KG_SOURCE_REL],
   });
 
-  console.log(`\n🧭 Expanded triplets (depth=${options.pathDepth}, limit=${options.limit}): ${triplets.length}`);
+  const isMetadataPredicate = (pred: string) => {
+    if (!pred) return true;
+    if (pred.includes("urn:hkv:prop:")) return true;
+    if (pred === "http://www.w3.org/1999/02/22-rdf-syntax-ns#type") return true;
+    if (pred === "FROM_DOCUMENT") return true;
+    return false;
+  };
+
+  const split = (triplets as any[]).reduce(
+    (acc, t) => {
+      const p = t?.[1]?.label ?? t?.[1]?.id ?? "";
+      if (isMetadataPredicate(String(p))) acc.metadata.push(t);
+      else acc.semantic.push(t);
+      return acc;
+    },
+    { semantic: [] as any[], metadata: [] as any[] }
+  );
+
+  console.log(
+    `\n🧭 Expanded triplets (depth=${options.pathDepth}, limit=${options.limit}): total=${triplets.length} semantic=${split.semantic.length} metadata=${split.metadata.length}`
+  );
   const kgIds = kgNodes.map((n: any) => n.id);
-  const scoredTriplets = (triplets as any[]).map((t: any) => {
+  const scoredTriplets = (split.semantic.length > 0 ? split.semantic : (triplets as any[])).map((t: any) => {
     const idx1 = kgIds.indexOf(t[0]?.id);
     const idx2 = kgIds.indexOf(t[2]?.id);
     const score1 = idx1 >= 0 ? scores[idx1] : 0;
@@ -310,7 +359,7 @@ async function explainRetrieval(
     return { triplet: t, baseScore: base, score: boosted, boostedReason };
   });
 
-  scoredTriplets.sort((a, b) => b.score - a.score);
+  scoredTriplets.sort((a: { score: number }, b: { score: number }) => b.score - a.score);
   for (const [i, r] of scoredTriplets.slice(0, 20).entries()) {
     const [s, p, o] = r.triplet;
     const subj = `${s?.label ?? "?"}:${s?.name ?? s?.id ?? "?"}`;
@@ -318,7 +367,7 @@ async function explainRetrieval(
     const obj = `${o?.label ?? "?"}:${o?.name ?? o?.id ?? "?"}`;
     const boostNote = r.boostedReason ? ` boosted(${r.boostedReason})` : "";
     console.log(
-      `   [${i + 1}] score=${r.score.toFixed(3)} base=${r.baseScore.toFixed(3)}${boostNote} :: ${subj} -[${pred}]-> ${obj}`
+      `   [${i + 1}] score=${r.score.toFixed(6)} base=${r.baseScore.toFixed(6)}${boostNote} :: ${subj} -[${pred}]-> ${obj}`
     );
   }
   console.log();
@@ -410,6 +459,18 @@ async function main() {
         }
         try {
           await explainRetrieval(explainQuery, graphStore, DEFAULT_QUERY_OPTIONS);
+
+          // Also run the normal KG-RAG flow so you get an answer after the debug output.
+          console.log("🤖 Assistant: ");
+          const results = await index.query(explainQuery, {
+            similarityTopK: DEFAULT_QUERY_OPTIONS.similarityTopK,
+            pathDepth: DEFAULT_QUERY_OPTIONS.pathDepth,
+            limit: DEFAULT_QUERY_OPTIONS.limit,
+            crossCheckBoost: DEFAULT_QUERY_OPTIONS.crossCheckBoost,
+            crossCheckBoostFactor: DEFAULT_QUERY_OPTIONS.crossCheckBoostFactor,
+          });
+          const response = await generateResponse(explainQuery, results);
+          console.log(response);
         } catch (error: any) {
           console.error("\n❌ Explain error:", error.message);
         }

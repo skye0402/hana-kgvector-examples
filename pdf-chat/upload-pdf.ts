@@ -67,28 +67,47 @@ const embedModel = {
         const response = await openai.embeddings.create({
           model: process.env.DEFAULT_EMBEDDING_MODEL || "text-embedding-3-small",
           input: text,
-          encoding_format: "base64",
+          encoding_format: "float"
         });
-        
-        const b64 = response.data[0].embedding as unknown as string;
-        const buffer = Buffer.from(b64, "base64");
-        if (buffer.byteLength % 4 !== 0) {
-          throw new Error(`Invalid base64 embedding byteLength=${buffer.byteLength} (not divisible by 4)`);
-        }
 
-        // IMPORTANT: Buffer is a view into an ArrayBuffer. Respect byteOffset/byteLength.
-        const float32Array = new Float32Array(
-          buffer.buffer,
-          buffer.byteOffset,
-          buffer.byteLength / 4
-        );
-        const embedding = Array.from(float32Array);
+        const rawEmbedding = response.data[0].embedding as unknown;
+        let embedding: number[];
+
+        // Prefer numeric embeddings to avoid any base64/proxy decoding mismatch.
+        if (Array.isArray(rawEmbedding)) {
+          embedding = rawEmbedding as number[];
+        } else if (typeof rawEmbedding === "string") {
+          const buffer = Buffer.from(rawEmbedding, "base64");
+          if (buffer.byteLength % 4 !== 0) {
+            throw new Error(
+              `Invalid base64 embedding byteLength=${buffer.byteLength} (not divisible by 4)`
+            );
+          }
+          const float32Array = new Float32Array(
+            buffer.buffer,
+            buffer.byteOffset,
+            buffer.byteLength / 4
+          );
+          embedding = Array.from(float32Array);
+        } else {
+          throw new Error("Unknown embedding format returned by provider");
+        }
         
         // Validate embedding - check for null/NaN/Infinity values
         const hasInvalidValues = embedding.some(v => v === null || !Number.isFinite(v));
         if (hasInvalidValues) {
           console.log(`   [Embed #${currentCount}] ⚠️ Invalid values in embedding, retrying...`);
           throw new Error("Embedding contains invalid values (null/NaN/Infinity)");
+        }
+
+        // Sanity check: embeddings should be small-magnitude numbers (typically ~[-1, 1]).
+        // If we see huge magnitudes, it's almost certainly a decoding/format issue.
+        const maxAbs = embedding.reduce((m, v) => Math.max(m, Math.abs(v as number)), 0);
+        if (maxAbs > 100) {
+          console.log(
+            `   [Embed #${currentCount}] ⚠️ Suspicious embedding magnitude maxAbs=${maxAbs.toExponential(2)}, retrying...`
+          );
+          throw new Error("Embedding magnitude too large; likely decode/format mismatch");
         }
         
         if (VERBOSE_EMBED_LOG) {
