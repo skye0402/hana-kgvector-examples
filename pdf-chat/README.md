@@ -8,6 +8,7 @@ This example demonstrates how to build a PDF document Q&A system using `hana-kgv
 ## Features
 
 - 📄 **PDF text extraction** with automatic chunking
+- 🔬 **Schema Induction** - automatically discovers domain-specific entity/relation types
 - 🧠 **Knowledge graph extraction** using LLM (entities, relations)
 - 🔍 **Hybrid retrieval** combining vector search + graph traversal
 - 💬 **Interactive chat** with AI-generated responses
@@ -36,13 +37,13 @@ pnpm install
 
 ### 2. Configure Environment
 
-Copy `.env.example` to `.env` and fill in your credentials:
+Copy `.env.example` to `.env.local` and fill in your credentials:
 
 ```bash
-cp .env.example .env
+cp .env.example .env.local
 ```
 
-Edit `.env`:
+Edit `.env.local`:
 
 ```env
 # SAP HANA Cloud
@@ -52,12 +53,12 @@ HANA_USER=your-username
 HANA_PASSWORD=your-password
 
 # LLM API (LiteLLM proxy or OpenAI)
-LITELLM_API_BASE=http://localhost:4000
+LITELLM_PROXY_URL=http://localhost:4000
 LITELLM_API_KEY=your-api-key
 
 # Models
-EMBEDDING_MODEL=text-embedding-3-small
-LLM_MODEL=gpt-4
+DEFAULT_EMBEDDING_MODEL=text-embedding-3-small
+DEFAULT_LLM_MODEL=gpt-4
 ```
 
 ### 3. Prepare a PDF
@@ -83,10 +84,11 @@ pnpm upload /path/to/your/document.pdf
 
 **What happens:**
 1. Extracts text from the PDF
-2. Chunks text into manageable segments (1000 chars with 200 char overlap)
-3. Connects to HANA Cloud
-4. Extracts entities (PERSON, ORGANIZATION, LOCATION, etc.) and relations using LLM
-5. Stores everything in HANA (vectors + RDF knowledge graph)
+2. Chunks text into manageable segments (1000 chars with 100 char overlap)
+3. **Schema Induction**: Analyzes a sample (~5 pages) to discover domain-specific entity and relation types
+4. Connects to HANA Cloud
+5. Extracts entities and relations using the discovered schema
+6. Stores everything in HANA (vectors + RDF knowledge graph)
 
 **Example output:**
 ```
@@ -94,8 +96,16 @@ pnpm upload /path/to/your/document.pdf
    Pages: 10
    Text length: 15234 characters
 
-✂️  Chunking text (size: 1000, overlap: 200)
+✂️  Chunking text (size: 1000, overlap: 100)
    Created 18 chunks
+
+🔬 Schema Induction: Analyzing document to discover domain-specific schema...
+   Sample size: 15000 characters
+
+   📋 Discovered Schema:
+   Description: Technical documentation about cloud deployment and SAP services
+   Entity Types (6): ORGANIZATION, PRODUCT, SERVICE, TECHNOLOGY, FEATURE, CONCEPT
+   Relation Types (10): PROVIDES, USES, INTEGRATES_WITH, SUPPORTS, ENABLES, PART_OF, DEPENDS_ON, DEPLOYED_ON, CONFIGURED_BY, RELATED_TO
 
 🚀 Inserting 18 chunks and extracting knowledge graph...
 
@@ -191,6 +201,34 @@ const response = await generateResponse(userQuestion, results);
 
 ## Customization
 
+### Schema Induction Settings
+
+The upload script automatically discovers domain-specific entity and relation types by analyzing a sample of your document. Configure this behavior in `upload-pdf.ts`:
+
+```typescript
+// Configuration
+const SCHEMA_SAMPLE_SIZE = 15000; // ~5 pages for schema induction
+const AUTO_DISCOVER_SCHEMA = true; // Set to false to use hardcoded schema
+const HUMAN_REVIEW = false; // Set to true to prompt for schema approval
+```
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `AUTO_DISCOVER_SCHEMA` | `true` | Enable automatic schema discovery from document |
+| `HUMAN_REVIEW` | `false` | Prompt user to approve discovered schema |
+| `SCHEMA_SAMPLE_SIZE` | `15000` | Characters to analyze (~5 pages) |
+
+**How Schema Induction works:**
+1. Takes a sample from the beginning of your document
+2. Sends it to the LLM with a specialized prompt
+3. LLM analyzes the content and proposes entity/relation types
+4. Schema is used for the actual extraction
+
+**Benefits:**
+- **Domain-agnostic**: Works for legal, medical, technical, financial documents
+- **No manual configuration**: Schema adapts to your document's content
+- **Better extraction quality**: Relations match the actual document vocabulary
+
 ### Adjust Chunking
 
 Edit `upload-pdf.ts`:
@@ -202,18 +240,58 @@ const CHUNK_OVERLAP = 300;  // More overlap = better continuity
 
 ### Modify Entity Schema
 
-Edit the schema in `upload-pdf.ts` to extract domain-specific entities:
+The default schema includes comprehensive relation types for general business/technical documents:
 
 ```typescript
 const schema = {
-  entityTypes: ["DISEASE", "DRUG", "SYMPTOM", "TREATMENT"],
-  relationTypes: ["TREATS", "CAUSES", "PREVENTS"],
-  validationSchema: [
-    ["DRUG", "TREATS", "DISEASE"],
-    ["DISEASE", "CAUSES", "SYMPTOM"],
+  entityTypes: [
+    "PERSON", "ORGANIZATION", "LOCATION", "PRODUCT",
+    "SERVICE", "TECHNOLOGY", "CONCEPT", "EVENT", "DATE", "DOCUMENT"
+  ],
+  relationTypes: [
+    // Employment & Roles
+    "WORKS_AT", "LEADS", "MANAGES", "REPORTS_TO", "FOUNDED_BY",
+    // Location & Geography
+    "LOCATED_IN", "HEADQUARTERED_IN", "OPERATES_IN",
+    // Products & Services
+    "PRODUCES", "PROVIDES", "OFFERS", "USES", "REQUIRES",
+    // Relationships & Structure
+    "PART_OF", "CONTAINS", "BELONGS_TO", "SUBSIDIARY_OF", "PARTNER_OF", "COMPETES_WITH",
+    // Actions & Events
+    "ACQUIRED", "MERGED_WITH", "INVESTED_IN", "LAUNCHED", "ANNOUNCED",
+    // Technical & Functional
+    "SUPPORTS", "ENABLES", "INTEGRATES_WITH", "DEPENDS_ON", "IMPLEMENTS", "EXTENDS",
+    // Temporal
+    "OCCURRED_ON", "STARTED_ON", "ENDED_ON",
+    // Generic fallback
+    "RELATED_TO"
   ],
 };
 ```
+
+**For domain-specific use cases**, customize the schema:
+
+```typescript
+// Medical domain
+const medicalSchema = {
+  entityTypes: ["DISEASE", "DRUG", "SYMPTOM", "TREATMENT", "BODY_PART", "PROCEDURE"],
+  relationTypes: ["TREATS", "CAUSES", "PREVENTS", "DIAGNOSES", "CONTRAINDICATES", "RELATED_TO"],
+};
+
+// Legal domain
+const legalSchema = {
+  entityTypes: ["PARTY", "CONTRACT", "CLAUSE", "OBLIGATION", "RIGHT", "JURISDICTION"],
+  relationTypes: ["BINDS", "GRANTS", "RESTRICTS", "GOVERNS", "REFERENCES", "RELATED_TO"],
+};
+
+// Automotive domain
+const automotiveSchema = {
+  entityTypes: ["VEHICLE", "COMPONENT", "MANUFACTURER", "STANDARD", "FEATURE", "SYSTEM"],
+  relationTypes: ["MANUFACTURES", "CONTAINS", "COMPLIES_WITH", "INTEGRATES", "RELATED_TO"],
+};
+```
+
+**Important**: Always include `RELATED_TO` as a fallback relation type. The LLM may generate relations not in your schema; with `strict: false`, unknown relations are dropped gracefully rather than causing errors.
 
 ### Tune Retrieval Parameters
 

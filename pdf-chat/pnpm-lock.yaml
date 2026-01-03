@@ -12,32 +12,32 @@ importers:
         specifier: 2.27.19
         version: 2.27.19
       hana-kgvector:
-        specifier: ^0.1.4
-        version: 0.1.4
+        specifier: ^0.1.5
+        version: 0.1.5
       openai:
-        specifier: ^4.0.0
+        specifier: ^4.104.0
         version: 4.104.0(zod@3.25.76)
       pdf-parse:
-        specifier: ^1.1.1
+        specifier: ^1.1.4
         version: 1.1.4
       zod:
-        specifier: ^3.23.8
+        specifier: ^3.25.76
         version: 3.25.76
     devDependencies:
       '@types/node':
-        specifier: ^20.0.0
+        specifier: ^20.19.27
         version: 20.19.27
       '@types/pdf-parse':
-        specifier: ^1.1.4
+        specifier: ^1.1.5
         version: 1.1.5
       dotenv:
-        specifier: ^16.4.5
+        specifier: ^16.6.1
         version: 16.6.1
       tsx:
-        specifier: ^4.0.0
+        specifier: ^4.21.0
         version: 4.21.0
       typescript:
-        specifier: ^5.0.0
+        specifier: ^5.9.3
         version: 5.9.3
 
 packages:
@@ -312,8 +312,8 @@ packages:
     resolution: {integrity: sha512-ZUKRh6/kUFoAiTAtTYPZJ3hw9wNxx+BIBOijnlG9PnrJsCcSjs1wyyD6vJpaYtgnzDrKYRSqf3OO6Rfa93xsRg==}
     engines: {node: '>= 0.4'}
 
-  hana-kgvector@0.1.4:
-    resolution: {integrity: sha512-jHCilqLnrHFkxAah6NfMXe8dt6ZN9FlV4/PHiqsrr+oRPdcOcn3NLKCdjRSauXW0qywdWDeUfi6SW1DS7Qp4dg==}
+  hana-kgvector@0.1.5:
+    resolution: {integrity: sha512-SAzWKkG8c89+vugsQOjdlL86qDuDmmJHfYtYPeCAyIO6QiNuONFUZ9PE3a2EQYGzkDScjhiBmDVJ0/VTSq+ZeQ==}
 
   has-symbols@1.1.0:
     resolution: {integrity: sha512-1cDNdwJ2Jaohmb3sg4OmKaMBwuC48sYni5HUw2DvsC8LjGTLK9h+eb1X6RyuOHe4hT0ULCW68iomhjUoKUqlPQ==}
@@ -642,7 +642,7 @@ snapshots:
 
   gopd@1.2.0: {}
 
-  hana-kgvector@0.1.4:
+  hana-kgvector@0.1.5:
     dependencies:
       openai: 4.104.0(zod@3.25.76)
       zod: 3.25.76

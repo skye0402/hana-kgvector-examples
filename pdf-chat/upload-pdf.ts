@@ -30,6 +30,10 @@ const PDF_PATH = process.argv[2] || "./sample.pdf";
 const GRAPH_NAME = "pdf_documents";
 const CHUNK_SIZE = 1000; // characters per chunk
 const CHUNK_OVERLAP = 100;
+const SCHEMA_SAMPLE_SIZE = 15000; // ~5 pages for schema induction
+const AUTO_DISCOVER_SCHEMA = true; // Set to false to use hardcoded schema
+const HUMAN_REVIEW = false; // Set to true to prompt for schema approval
+const TRIPLETS_PER_CHUNK_CAP: number | undefined = undefined; // Set e.g. to 15 to cap; undefined = no cap
 
 // Initialize OpenAI client
 const openai = new OpenAI({
@@ -37,71 +41,132 @@ const openai = new OpenAI({
   baseURL: process.env.LITELLM_PROXY_URL,
 });
 
-// Embedding model wrapper
+// Embedding model wrapper with retry logic and deduplication
 let embeddingCount = 0;
+const MAX_RETRIES = 3;
+const RETRY_DELAY_MS = 2000;
+const EMBED_CONCURRENCY = 5; // Process 5 embeddings in parallel
+const VERBOSE_EMBED_LOG = false; // Set to true to see every embedding
+
+async function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 const embedModel = {
   async getTextEmbedding(text: string): Promise<number[]> {
-    embeddingCount++;
-    const truncatedText = text.length > 50 ? text.slice(0, 50) + "..." : text;
-    console.log(`   [Embed #${embeddingCount}] Embedding: "${truncatedText}"`);
+    const currentCount = ++embeddingCount;
     
-    const response = await openai.embeddings.create({
-      model: process.env.DEFAULT_EMBEDDING_MODEL || "text-embedding-3-small",
-      input: text,
-      encoding_format: "base64",
-    });
-    
-    const b64 = response.data[0].embedding as unknown as string;
-    const buffer = Buffer.from(b64, "base64");
-    const float32Array = new Float32Array(buffer.buffer);
-    console.log(`   [Embed #${embeddingCount}] ✅ Got ${float32Array.length}-dim vector`);
-    return Array.from(float32Array);
+    let lastError: Error | null = null;
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        const response = await openai.embeddings.create({
+          model: process.env.DEFAULT_EMBEDDING_MODEL || "text-embedding-3-small",
+          input: text,
+          encoding_format: "base64",
+        });
+        
+        const b64 = response.data[0].embedding as unknown as string;
+        const buffer = Buffer.from(b64, "base64");
+        const float32Array = new Float32Array(buffer.buffer);
+        
+        if (VERBOSE_EMBED_LOG) {
+          const truncatedText = text.length > 40 ? text.slice(0, 40) + "..." : text;
+          console.log(`   [Embed #${currentCount}] "${truncatedText}" → ${float32Array.length}d`);
+        }
+        return Array.from(float32Array);
+      } catch (error: any) {
+        lastError = error;
+        if (attempt < MAX_RETRIES) {
+          const delay = RETRY_DELAY_MS * attempt;
+          console.log(`   [Embed #${currentCount}] ⚠️ Retry ${attempt}/${MAX_RETRIES} after ${delay}ms`);
+          await sleep(delay);
+        }
+      }
+    }
+    throw lastError;
   },
   
   async getTextEmbeddingBatch(texts: string[]): Promise<number[][]> {
-    console.log(`   [Embed] Batch embedding ${texts.length} texts...`);
-    return Promise.all(texts.map((t) => this.getTextEmbedding(t)));
+    // Deduplicate texts to avoid redundant API calls
+    const uniqueTexts = [...new Set(texts)];
+    const duplicateCount = texts.length - uniqueTexts.length;
+    
+    console.log(`   [Embed] Processing ${texts.length} texts → ${uniqueTexts.length} unique (${duplicateCount} duplicates)`);
+    
+    // Build cache of unique embeddings with parallel processing
+    const cache = new Map<string, number[]>();
+    const startTime = Date.now();
+    
+    for (let i = 0; i < uniqueTexts.length; i += EMBED_CONCURRENCY) {
+      const batch = uniqueTexts.slice(i, i + EMBED_CONCURRENCY);
+      const embeddings = await Promise.all(batch.map(t => this.getTextEmbedding(t)));
+      batch.forEach((text, idx) => cache.set(text, embeddings[idx]));
+      
+      // Progress update every 20 embeddings
+      if ((i + EMBED_CONCURRENCY) % 20 === 0 || i + EMBED_CONCURRENCY >= uniqueTexts.length) {
+        const done = Math.min(i + EMBED_CONCURRENCY, uniqueTexts.length);
+        const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+        console.log(`   [Embed] Progress: ${done}/${uniqueTexts.length} (${elapsed}s)`);
+      }
+    }
+    
+    const totalTime = ((Date.now() - startTime) / 1000).toFixed(1);
+    console.log(`   [Embed] ✅ Completed ${uniqueTexts.length} embeddings in ${totalTime}s`);
+    
+    // Return embeddings in original order (including duplicates)
+    return texts.map(t => cache.get(t)!);
   },
 };
 
-// LLM client wrapper implementing the LLMClient interface
+// LLM client wrapper implementing the LLMClient interface with retry logic
+let llmCallCount = 0;
+let totalTriplets = 0;
 const llmClient = {
   async structuredPredict<T>(schema: import("zod").ZodType<T>, prompt: string): Promise<T> {
-    console.log(`   [LLM] Calling ${process.env.DEFAULT_LLM_MODEL || "gpt-4"} for entity extraction...`);
+    const callNum = ++llmCallCount;
+    console.log(`   [LLM #${callNum}] Extracting entities...`);
     
-    const response = await openai.chat.completions.create({
-      model: process.env.DEFAULT_LLM_MODEL || "gpt-4",
-      messages: [
-        {
-          role: "system",
-          content: "You are a helpful assistant that extracts structured information. Always respond with valid JSON matching the requested schema. IMPORTANT: Only use the exact relation types provided in the schema.",
-        },
-        { role: "user", content: prompt },
-      ],
-      temperature: 0,
-      response_format: { type: "json_object" },
-    });
-    
-    const content = response.choices[0]?.message?.content || "{}";
-    console.log(`   [LLM] Response received (${content.length} chars)`);
-    
-    const parsed = JSON.parse(content);
-    
-    // Use safeParse to handle validation errors gracefully
-    const result = schema.safeParse(parsed);
-    if (result.success) {
-      console.log(`   [LLM] ✅ Validation passed`);
-      return result.data;
-    } else {
-      // Log validation errors but try to salvage what we can
-      console.log(`   [LLM] ⚠️  Validation issues: ${result.error.issues.length} problems`);
-      for (const issue of result.error.issues) {
-        console.log(`         - ${issue.path.join('.')}: ${issue.message}`);
+    let lastError: Error | null = null;
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        const response = await openai.chat.completions.create({
+          model: process.env.DEFAULT_LLM_MODEL || "gpt-4",
+          messages: [
+            {
+              role: "system",
+              content: "You are a helpful assistant that extracts structured information. Always respond with valid JSON matching the requested schema. IMPORTANT: Only use the exact relation types provided in the schema.",
+            },
+            { role: "user", content: prompt },
+          ],
+          temperature: 0,
+          response_format: { type: "json_object" },
+        });
+        
+        const content = response.choices[0]?.message?.content || "{}";
+        const parsed = JSON.parse(content);
+        
+        // Use safeParse to handle validation errors gracefully
+        const result = schema.safeParse(parsed);
+        if (result.success) {
+          const tripletCount = (result.data as any).triplets?.length || 0;
+          totalTriplets += tripletCount;
+          console.log(`   [LLM #${callNum}] ✅ ${tripletCount} triplets extracted (total: ${totalTriplets})`);
+          return result.data;
+        } else {
+          console.log(`   [LLM #${callNum}] ⚠️  Validation failed: ${result.error.issues.length} issues`);
+          return { triplets: [] } as T;
+        }
+      } catch (error: any) {
+        lastError = error;
+        if (attempt < MAX_RETRIES) {
+          const delay = RETRY_DELAY_MS * attempt;
+          console.log(`   [LLM #${callNum}] ⚠️ Retry ${attempt}/${MAX_RETRIES} after ${delay}ms`);
+          await sleep(delay);
+        }
       }
-      // Return empty triplets if validation fails completely
-      // The library's SchemaLLMPathExtractor will handle this gracefully
-      return { triplets: [] } as T;
     }
+    console.log(`   [LLM #${callNum}] ❌ Failed after ${MAX_RETRIES} retries`);
+    return { triplets: [] } as T;
   },
 };
 
@@ -119,6 +184,125 @@ function chunkText(text: string, chunkSize: number, overlap: number): string[] {
   }
   
   return chunks;
+}
+
+interface DiscoveredSchema {
+  entityTypes: string[];
+  relationTypes: string[];
+  description: string;
+}
+
+/**
+ * Schema Induction: Analyze document sample to discover appropriate entity and relation types
+ * This makes the extraction domain-agnostic - works for legal, medical, technical, etc.
+ */
+async function discoverSchema(textSample: string): Promise<DiscoveredSchema> {
+  console.log("\n🔬 Schema Induction: Analyzing document to discover domain-specific schema...");
+  console.log(`   Sample size: ${textSample.length} characters`);
+  
+  const inductionPrompt = `You are a Knowledge Graph schema designer. Analyze the provided text and define an optimal schema for extracting a Knowledge Graph.
+
+Constraints:
+1. Identify 5-8 Entity Types that capture the main concepts (e.g., PERSON, ORGANIZATION, PRODUCT)
+2. Identify 8-12 Relation Types that capture how entities relate (e.g., WORKS_AT, PRODUCES)
+3. Entity types must be UPPER_SNAKE_CASE nouns
+4. Relation types must be UPPER_SNAKE_CASE verbs
+5. Avoid overly generic relations like "HAS" or "IS" - be specific
+6. Always include "RELATED_TO" as a fallback relation type
+7. Focus on relations that would help answer questions about this document
+
+Input Text (sample):
+---
+${textSample}
+---
+
+Return ONLY a valid JSON object with this exact structure:
+{
+  "entityTypes": ["TYPE_1", "TYPE_2", ...],
+  "relationTypes": ["RELATION_1", "RELATION_2", ..., "RELATED_TO"],
+  "description": "Brief description of what domain/topic this schema covers"
+}`;
+
+  const response = await openai.chat.completions.create({
+    model: process.env.DEFAULT_LLM_MODEL || "gpt-4",
+    messages: [
+      {
+        role: "system",
+        content: "You are an expert at designing Knowledge Graph schemas. Return only valid JSON.",
+      },
+      { role: "user", content: inductionPrompt },
+    ],
+    temperature: 0.3,
+    response_format: { type: "json_object" },
+  });
+
+  const content = response.choices[0]?.message?.content || "{}";
+  const schema = JSON.parse(content) as DiscoveredSchema;
+  
+  // Ensure RELATED_TO is always included as fallback
+  if (!schema.relationTypes.includes("RELATED_TO")) {
+    schema.relationTypes.push("RELATED_TO");
+  }
+  
+  console.log(`\n   📋 Discovered Schema:`);
+  console.log(`   Description: ${schema.description}`);
+  console.log(`   Entity Types (${schema.entityTypes.length}): ${schema.entityTypes.join(", ")}`);
+  console.log(`   Relation Types (${schema.relationTypes.length}): ${schema.relationTypes.join(", ")}`);
+  
+  return schema;
+}
+
+/**
+ * Optional: Prompt user to review and approve the discovered schema
+ */
+async function reviewSchema(schema: DiscoveredSchema): Promise<DiscoveredSchema> {
+  const readline = await import("readline");
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+
+  return new Promise((resolve) => {
+    console.log("\n🔍 Schema Review (Human-in-the-loop):");
+    console.log(JSON.stringify(schema, null, 2));
+    
+    rl.question("\nApprove this schema? (y/n/edit): ", (answer) => {
+      rl.close();
+      if (answer.toLowerCase() === "y" || answer.toLowerCase() === "yes") {
+        console.log("   ✅ Schema approved");
+        resolve(schema);
+      } else if (answer.toLowerCase() === "edit") {
+        console.log("   ⚠️  Manual editing not implemented - using discovered schema");
+        resolve(schema);
+      } else {
+        console.log("   ⚠️  Schema rejected - using discovered schema anyway (implement rejection handling as needed)");
+        resolve(schema);
+      }
+    });
+  });
+}
+
+/**
+ * Fallback schema for when auto-discovery is disabled
+ */
+function getDefaultSchema(): DiscoveredSchema {
+  return {
+    entityTypes: [
+      "PERSON", "ORGANIZATION", "LOCATION", "PRODUCT",
+      "SERVICE", "TECHNOLOGY", "CONCEPT", "EVENT", "DATE"
+    ],
+    relationTypes: [
+      "WORKS_AT", "LEADS", "MANAGES", "FOUNDED_BY",
+      "LOCATED_IN", "HEADQUARTERED_IN", "OPERATES_IN",
+      "PRODUCES", "PROVIDES", "USES", "REQUIRES",
+      "PART_OF", "CONTAINS", "SUBSIDIARY_OF", "PARTNER_OF",
+      "ACQUIRED", "MERGED_WITH", "INVESTED_IN", "LAUNCHED",
+      "SUPPORTS", "ENABLES", "INTEGRATES_WITH", "DEPENDS_ON",
+      "OCCURRED_ON", "STARTED_ON", "ENDED_ON",
+      "RELATED_TO"
+    ],
+    description: "General-purpose schema for business/technical documents"
+  };
 }
 
 /**
@@ -170,29 +354,22 @@ async function main() {
     graphName: GRAPH_NAME,
   });
   
-  // Define schema for entity extraction
-  const schema = {
-    entityTypes: ["PERSON", "ORGANIZATION", "LOCATION", "PRODUCT", "CONCEPT", "DATE"],
-    relationTypes: [
-      "WORKS_AT",
-      "LOCATED_IN",
-      "PRODUCES",
-      "FOUNDED_BY",
-      "PART_OF",
-      "RELATED_TO",
-      "OCCURRED_ON",
-    ],
-    validationSchema: [
-      ["PERSON", "WORKS_AT", "ORGANIZATION"],
-      ["ORGANIZATION", "LOCATED_IN", "LOCATION"],
-      ["ORGANIZATION", "PRODUCES", "PRODUCT"],
-      ["ORGANIZATION", "FOUNDED_BY", "PERSON"],
-      ["PRODUCT", "PART_OF", "ORGANIZATION"],
-      ["CONCEPT", "RELATED_TO", "CONCEPT"],
-      ["PERSON", "RELATED_TO", "PERSON"],
-      ["ORGANIZATION", "RELATED_TO", "ORGANIZATION"],
-    ] as [string, string, string][],
-  };
+  // 5. Schema Induction: Discover or use default schema
+  let schema: DiscoveredSchema;
+  
+  if (AUTO_DISCOVER_SCHEMA) {
+    // Take a sample from the beginning of the document for schema induction
+    const sampleText = pdfText.slice(0, SCHEMA_SAMPLE_SIZE);
+    schema = await discoverSchema(sampleText);
+    
+    // Optional: Human review of discovered schema
+    if (HUMAN_REVIEW) {
+      schema = await reviewSchema(schema);
+    }
+  } else {
+    console.log("\n📋 Using default schema (AUTO_DISCOVER_SCHEMA=false)");
+    schema = getDefaultSchema();
+  }
   
   const index = new PropertyGraphIndex({
     propertyGraphStore: graphStore,
@@ -201,7 +378,9 @@ async function main() {
       new SchemaLLMPathExtractor({
         llm: llmClient,
         schema,
-        maxTripletsPerChunk: 15,
+        ...(TRIPLETS_PER_CHUNK_CAP !== undefined
+          ? { maxTripletsPerChunk: TRIPLETS_PER_CHUNK_CAP }
+          : {}),
         strict: false, // Allow relations not in validationSchema
       }),
       new ImplicitPathExtractor(),
