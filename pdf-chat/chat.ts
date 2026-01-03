@@ -388,13 +388,7 @@ async function main() {
         try {
           await explainRetrieval(lastQuestion, graphStore, DEFAULT_QUERY_OPTIONS);
           console.log("🤖 Assistant: ");
-          const results = await index.query(lastQuestion, {
-            similarityTopK: DEFAULT_QUERY_OPTIONS.similarityTopK,
-            pathDepth: DEFAULT_QUERY_OPTIONS.pathDepth,
-            limit: DEFAULT_QUERY_OPTIONS.limit,
-            crossCheckBoost: DEFAULT_QUERY_OPTIONS.crossCheckBoost,
-            crossCheckBoostFactor: DEFAULT_QUERY_OPTIONS.crossCheckBoostFactor,
-          });
+          const results = await index.query(lastQuestion, DEFAULT_QUERY_OPTIONS);
           const response = await generateResponse(lastQuestion, results);
           console.log(response);
         } catch (error: any) {
@@ -413,16 +407,8 @@ async function main() {
         }
         try {
           await explainRetrieval(explainQuery, graphStore, DEFAULT_QUERY_OPTIONS);
-
-          // Also run the normal KG-RAG flow so you get an answer after the debug output.
           console.log("🤖 Assistant: ");
-          const results = await index.query(explainQuery, {
-            similarityTopK: DEFAULT_QUERY_OPTIONS.similarityTopK,
-            pathDepth: DEFAULT_QUERY_OPTIONS.pathDepth,
-            limit: DEFAULT_QUERY_OPTIONS.limit,
-            crossCheckBoost: DEFAULT_QUERY_OPTIONS.crossCheckBoost,
-            crossCheckBoostFactor: DEFAULT_QUERY_OPTIONS.crossCheckBoostFactor,
-          });
+          const results = await index.query(explainQuery, DEFAULT_QUERY_OPTIONS);
           const response = await generateResponse(explainQuery, results);
           console.log(response);
         } catch (error: any) {
@@ -442,13 +428,7 @@ async function main() {
           await explainRetrieval(query, graphStore, DEFAULT_QUERY_OPTIONS);
         }
         
-        const results = await index.query(query, {
-          similarityTopK: DEFAULT_QUERY_OPTIONS.similarityTopK,
-          pathDepth: DEFAULT_QUERY_OPTIONS.pathDepth,
-          limit: DEFAULT_QUERY_OPTIONS.limit,
-          crossCheckBoost: DEFAULT_QUERY_OPTIONS.crossCheckBoost,
-          crossCheckBoostFactor: DEFAULT_QUERY_OPTIONS.crossCheckBoostFactor,
-        });
+        const results = await index.query(query, DEFAULT_QUERY_OPTIONS);
         
         console.log(`   Found ${results.length} relevant passages\n`);
         

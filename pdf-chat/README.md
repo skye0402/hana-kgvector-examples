@@ -83,38 +83,46 @@ pnpm upload /path/to/your/document.pdf
 ```
 
 **What happens:**
-1. Extracts text from the PDF
+1. Extracts text from the PDF with page-level access
 2. Chunks text into manageable segments (1000 chars with 100 char overlap)
-3. **Schema Induction**: Analyzes a sample (~5 pages) to discover domain-specific entity and relation types
+3. **Schema Induction**: Samples pages from throughout the document (first 3 + evenly-distributed pages) to discover domain-specific entity and relation types
 4. Connects to HANA Cloud
 5. Extracts entities and relations using the discovered schema
-6. Stores everything in HANA (vectors + RDF knowledge graph)
+6. Embeds KG nodes for vector similarity search
+7. Stores everything in HANA (vectors + RDF knowledge graph)
 
 **Example output:**
 ```
 📄 Loading PDF: sample.pdf
-   Pages: 10
-   Text length: 15234 characters
+   Pages: 24
+   Text length: 45234 characters
 
 ✂️  Chunking text (size: 1000, overlap: 100)
-   Created 18 chunks
+   Created 52 chunks
 
 🔬 Schema Induction: Analyzing document to discover domain-specific schema...
-   Sample size: 15000 characters
+   Sampled 6 pages for schema induction: pages 1, 2, 3, 10, 17, 24
 
    📋 Discovered Schema:
-   Description: Technical documentation about cloud deployment and SAP services
-   Entity Types (6): ORGANIZATION, PRODUCT, SERVICE, TECHNOLOGY, FEATURE, CONCEPT
-   Relation Types (10): PROVIDES, USES, INTEGRATES_WITH, SUPPORTS, ENABLES, PART_OF, DEPENDS_ON, DEPLOYED_ON, CONFIGURED_BY, RELATED_TO
+   Description: Technical documentation about SAP S/4HANA transition
+   Entity Types (7): ORGANIZATION, PRODUCT, SERVICE, TECHNOLOGY, FEATURE, CONCEPT, PROCESS
+   Relation Types (11): PROVIDES, USES, INTEGRATES_WITH, SUPPORTS, ENABLES, PART_OF, DEPENDS_ON, REQUIRES, INCLUDES, REPLACES, RELATED_TO
 
-🚀 Inserting 18 chunks and extracting knowledge graph...
+🚀 Inserting 52 chunks and extracting knowledge graph...
+   [LLM #1] Extracting entities...
+   [LLM #1] ✅ 8 triplets extracted (total: 8)
+   ...
+   [Embed] Processing 156 texts → 142 unique (14 duplicates)
+   [Embed] ✅ Completed 142 embeddings in 12.3s
 
 ✅ Insertion complete in 45.2s
-   Processed 18 document chunks
+   Processed 52 document chunks
 
 📊 Extraction Statistics:
-   Total entities extracted: 87
-   Total relations extracted: 134
+   Total entities extracted: 187
+   Total relations extracted: 234
+   Average entities per chunk: 3.6
+   Average relations per chunk: 4.5
 ```
 
 ### Step 2: Chat with Your Document
@@ -152,6 +160,9 @@ researchers in the GraphRAG field...
 - Type your question and press Enter
 - `help` - Show available commands
 - `exit` or `quit` - Exit the chat
+- `explain <question>` - Show KG-RAG retrieval internals (vector matches, triplets, boosting)
+- `explain-last` - Re-explain the previous question
+- `auto-explain` - Toggle automatic debug output for every question
 
 ## How It Works
 
@@ -184,20 +195,32 @@ const index = new PropertyGraphIndex({
 await index.insert(documents);
 ```
 
-### Query Process
+### Query Process (KG-RAG)
+
+The chat uses a hybrid **Knowledge Graph RAG** (KG-RAG) approach that combines vector similarity with graph traversal:
 
 ```typescript
 // 1. Query the knowledge graph
 const results = await index.query(userQuestion, {
-  similarityTopK: 5,      // Top 5 similar entities
-  pathDepth: 2,           // Traverse 2 hops in graph
-  limit: 30,              // Max 30 results
-  crossCheckBoost: true,  // Boost provenance-linked facts
+  similarityTopK: 5,           // Top 5 similar KG nodes via vector search
+  pathDepth: 2,                // Traverse 2 hops in the graph
+  limit: 30,                   // Max 30 results
+  crossCheckBoost: true,       // Boost provenance-linked facts
+  crossCheckBoostFactor: 1.25, // Boost multiplier
 });
 
 // 2. Generate AI response using retrieved context
 const response = await generateResponse(userQuestion, results);
 ```
+
+**How KG-RAG retrieval works:**
+1. **Vector Search**: Embed the query and find similar KG nodes (entities)
+2. **Graph Expansion**: Traverse the knowledge graph from matched nodes to find related triplets
+3. **Cross-Check Boosting**: Boost triplets that share provenance (same source document/chunk) with vector-matched nodes
+4. **Context Building**: Combine semantic triplets + original chunk text for LLM context
+5. **Response Generation**: LLM answers based on the enriched context
+
+Use `explain <question>` in chat to see this process in detail.
 
 ## Customization
 
@@ -207,22 +230,26 @@ The upload script automatically discovers domain-specific entity and relation ty
 
 ```typescript
 // Configuration
-const SCHEMA_SAMPLE_SIZE = 15000; // ~5 pages for schema induction
-const AUTO_DISCOVER_SCHEMA = true; // Set to false to use hardcoded schema
-const HUMAN_REVIEW = false; // Set to true to prompt for schema approval
+const SCHEMA_SAMPLE_PAGES = 6;      // Number of pages to sample for schema induction
+const AUTO_DISCOVER_SCHEMA = true;  // Set to false to use hardcoded schema
+const HUMAN_REVIEW = false;         // Set to true to prompt for schema approval
+const RESET_TABLES = true;          // Clear existing graph data before upload
+const TRIPLETS_PER_CHUNK = 100;     // High value for natural extraction (not a hard cap)
 ```
 
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `AUTO_DISCOVER_SCHEMA` | `true` | Enable automatic schema discovery from document |
 | `HUMAN_REVIEW` | `false` | Prompt user to approve discovered schema |
-| `SCHEMA_SAMPLE_SIZE` | `15000` | Characters to analyze (~5 pages) |
+| `SCHEMA_SAMPLE_PAGES` | `6` | Number of pages to sample (first 3 + distributed) |
+| `RESET_TABLES` | `true` | Drop existing graph tables before upload |
+| `TRIPLETS_PER_CHUNK` | `100` | Hint to LLM for max triplets per chunk |
 
 **How Schema Induction works:**
-1. Takes a sample from the beginning of your document
-2. Sends it to the LLM with a specialized prompt
-3. LLM analyzes the content and proposes entity/relation types
-4. Schema is used for the actual extraction
+1. Samples pages from throughout your document (first 3 pages + evenly-distributed pages from the rest)
+2. Sends the sample to the LLM with a specialized prompt
+3. LLM analyzes the content and proposes domain-specific entity/relation types
+4. Schema is used for the actual knowledge graph extraction
 
 **Benefits:**
 - **Domain-agnostic**: Works for legal, medical, technical, financial documents
@@ -349,9 +376,10 @@ const results = await index.query(query, {
 
 ### "Embedding API returns errors"
 
-- Verify `LITELLM_API_BASE` and `LITELLM_API_KEY`
-- Test with: `curl $LITELLM_API_BASE/v1/models`
+- Verify `LITELLM_PROXY_URL` and `LITELLM_API_KEY`
+- Test with: `curl $LITELLM_PROXY_URL/v1/models`
 - Ensure model names match your LiteLLM configuration
+- Check that `DEFAULT_EMBEDDING_MODEL` is a valid embedding model
 
 ### "No results found"
 
@@ -362,8 +390,17 @@ const results = await index.query(query, {
 ### "Extraction is slow"
 
 - Reduce chunk count by increasing `CHUNK_SIZE`
-- Reduce `maxTripletsPerChunk` in schema extractor
+- Reduce `TRIPLETS_PER_CHUNK` (but keep it high enough for quality)
 - Use a faster LLM model
+- Embeddings run in parallel with deduplication
+
+### "Answers don't use the document content"
+
+- Use `explain <question>` to see what's being retrieved
+- Check that triplets are being extracted (see upload stats)
+- Increase `pathDepth` to traverse more graph connections
+- Increase `similarityTopK` for more vector matches
+- Check that the schema matches your document's domain
 
 ## Next Steps
 

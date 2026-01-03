@@ -30,7 +30,7 @@ const PDF_PATH = process.argv[2] || "./sample.pdf";
 const GRAPH_NAME = "pdf_documents";
 const CHUNK_SIZE = 1000; // characters per chunk
 const CHUNK_OVERLAP = 100;
-const SCHEMA_SAMPLE_SIZE = 15000; // ~5 pages for schema induction
+const SCHEMA_SAMPLE_PAGES = 6; // Number of pages to sample for schema induction
 const AUTO_DISCOVER_SCHEMA = true; // Set to false to use hardcoded schema
 const HUMAN_REVIEW = false; // Set to true to prompt for schema approval
 const RESET_TABLES = true;
@@ -346,10 +346,16 @@ function getDefaultSchema(): DiscoveredSchema {
   };
 }
 
+interface PdfData {
+  text: string;
+  pages: string[];
+  numPages: number;
+}
+
 /**
- * Extract text from PDF
+ * Extract text from PDF with page-level access
  */
-async function extractPdfText(pdfPath: string): Promise<string> {
+async function extractPdfText(pdfPath: string): Promise<PdfData> {
   console.log(`\n📄 Loading PDF: ${pdfPath}`);
   
   if (!fs.existsSync(pdfPath)) {
@@ -357,12 +363,61 @@ async function extractPdfText(pdfPath: string): Promise<string> {
   }
   
   const dataBuffer = fs.readFileSync(pdfPath);
-  const data = await pdfParse(dataBuffer);
+  
+  // Extract per-page text
+  const pages: string[] = [];
+  const data = await pdfParse(dataBuffer, {
+    pagerender: (pageData: any) => {
+      return pageData.getTextContent().then((textContent: any) => {
+        const pageText = textContent.items.map((item: any) => item.str).join(" ");
+        pages.push(pageText);
+        return pageText;
+      });
+    }
+  });
   
   console.log(`   Pages: ${data.numpages}`);
   console.log(`   Text length: ${data.text.length} characters`);
   
-  return data.text;
+  return { text: data.text, pages, numPages: data.numpages };
+}
+
+/**
+ * Sample pages for schema induction: first 3 pages + random pages from the rest
+ * This gives a better overview of document content than just the beginning
+ */
+function samplePagesForSchema(pages: string[], sampleCount: number): string {
+  if (pages.length === 0) return "";
+  
+  // Always include first 3 pages (or all if fewer)
+  const firstPages = pages.slice(0, Math.min(3, pages.length));
+  const remainingPages = pages.slice(3);
+  
+  // Calculate how many random pages we need
+  const randomCount = Math.max(0, sampleCount - firstPages.length);
+  
+  // Pick evenly-distributed pages from the rest of the document
+  const randomPages: string[] = [];
+  const step = randomCount > 0 && remainingPages.length > 0 
+    ? Math.max(1, Math.floor(remainingPages.length / randomCount)) 
+    : 1;
+  if (randomCount > 0 && remainingPages.length > 0) {
+    for (let i = 0; i < remainingPages.length && randomPages.length < randomCount; i += step) {
+      randomPages.push(remainingPages[i]);
+    }
+  }
+  
+  const sampledPages = [...firstPages, ...randomPages];
+  
+  // Build page indices for logging (1-indexed)
+  const sampledIndices = [
+    ...firstPages.map((_, i) => i + 1),
+    ...randomPages.map((_, i) => 4 + i * step)
+  ];
+  
+  console.log(`   Sampled ${sampledPages.length} pages for schema induction: pages ${sampledIndices.join(", ")}`);
+  
+  return sampledPages.join("\n\n--- Page Break ---\n\n");
 }
 
 async function main() {
@@ -371,7 +426,8 @@ async function main() {
   console.log("=".repeat(70));
   
   // 1. Extract PDF text
-  const pdfText = await extractPdfText(PDF_PATH);
+  const pdfData = await extractPdfText(PDF_PATH);
+  const pdfText = pdfData.text;
   const pdfName = path.basename(PDF_PATH, ".pdf");
   
   // 2. Chunk the text
@@ -400,8 +456,8 @@ async function main() {
   let schema: DiscoveredSchema;
   
   if (AUTO_DISCOVER_SCHEMA) {
-    // Take a sample from the beginning of the document for schema induction
-    const sampleText = pdfText.slice(0, SCHEMA_SAMPLE_SIZE);
+    // Sample pages from throughout the document for better schema coverage
+    const sampleText = samplePagesForSchema(pdfData.pages, SCHEMA_SAMPLE_PAGES);
     schema = await discoverSchema(sampleText);
     
     // Optional: Human review of discovered schema
