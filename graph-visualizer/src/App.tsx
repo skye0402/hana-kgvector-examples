@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import ForceGraph2D from 'react-force-graph-2d';
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -61,6 +61,39 @@ function App() {
   const [result, setResult] = useState<QueryResponse | null>(null);
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
   const graphRef = useRef<any>(null);
+
+  const markdownAnswer = useMemo(() => {
+    if (!result?.answer) return "";
+    const images = result.images ?? [];
+    if (images.length === 0) return result.answer;
+
+    const imageById = new Map<string, ImageInfo>();
+    for (const img of images) {
+      if (img?.imageId) imageById.set(img.imageId, img);
+    }
+
+    const injected = new Set<string>();
+
+    const inject = (text: string, imageId: string) => {
+      const img = imageById.get(imageId);
+      if (!img?.imagePath || injected.has(imageId)) return text;
+      injected.add(imageId);
+      const title = `Image ID: ${imageId}`;
+      return `${text}\n\n![${title}](${img.imagePath})\n`;
+    };
+
+    let out = result.answer;
+
+    out = out.replace(/Image ID:\s*([A-Za-z0-9_.-]+)/g, (match, id) => inject(match, String(id)));
+
+    out = out.replace(/\(ID:\s*([A-Za-z0-9_.-]+)\)/g, (match, id, offset, full) => {
+      const prefix = String(full).slice(Math.max(0, Number(offset) - 40), Number(offset));
+      if (!/image/i.test(prefix)) return match;
+      return inject(match, String(id));
+    });
+
+    return out;
+  }, [result]);
 
   const handleQuery = useCallback(async () => {
     if (!query.trim()) return;
@@ -252,7 +285,7 @@ function App() {
             {result ? (
               <div className="prose prose-invert prose-sm max-w-none">
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                  {result.answer}
+                  {markdownAnswer}
                 </ReactMarkdown>
               </div>
             ) : (
