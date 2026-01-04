@@ -4,3 +4,5 @@ dist
 *.log
 
 pnpm-lock.yaml
+*.pdf
+extracted_images/

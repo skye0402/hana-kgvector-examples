@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": "pdf-chat"
+		},
+		{
+			"path": "multi-doc-chat"
+		},
+		{
+			"path": "graph-visualizer"
+		}
+	],
+	"settings": {}
+}
