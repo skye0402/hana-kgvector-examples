@@ -8,13 +8,27 @@
 
 import {
   createHanaConnection,
-  HanaPropertyGraphStore,
 } from "hana-kgvector";
 import dotenv from "dotenv";
 
 dotenv.config({ path: ".env.local" });
 
 const GRAPH_NAME = "multi_doc_graph";
+
+type HanaExecResultRow = Record<string, unknown>;
+
+async function hanaExec(conn: any, sql: string): Promise<HanaExecResultRow[]> {
+  const maybePromise = conn.exec(sql);
+  if (maybePromise && typeof maybePromise.then === "function") {
+    return (await maybePromise) as HanaExecResultRow[];
+  }
+  return await new Promise<HanaExecResultRow[]>((resolve, reject) => {
+    conn.exec(sql, (err: unknown, result: unknown) => {
+      if (err) reject(err);
+      else resolve((result as HanaExecResultRow[] | null | undefined) ?? []);
+    });
+  });
+}
 
 async function main() {
   console.log("=".repeat(70));
@@ -37,7 +51,9 @@ async function main() {
   try {
     // Query the nodes table for unique documentId values
     const nodesTable = `"${GRAPH_NAME}_NODES"`;
-    const result = await conn.exec(`
+    const result = await hanaExec(
+      conn,
+      `
       SELECT DISTINCT 
         JSON_VALUE(PROPERTIES, '$.documentId') as DOC_ID,
         COUNT(*) as CHUNK_COUNT
@@ -45,15 +61,16 @@ async function main() {
       WHERE JSON_VALUE(PROPERTIES, '$.documentId') IS NOT NULL
       GROUP BY JSON_VALUE(PROPERTIES, '$.documentId')
       ORDER BY DOC_ID
-    `);
+    `
+    );
     
     if (result.length === 0) {
       console.log("   No documents found. Run 'pnpm upload' first.\n");
     } else {
       console.log(`   Found ${result.length} document(s):\n`);
       for (const row of result) {
-        console.log(`   • ${row.DOC_ID}`);
-        console.log(`     Chunks: ${row.CHUNK_COUNT}`);
+        console.log(`   • ${String(row.DOC_ID ?? "")}`);
+        console.log(`     Chunks: ${String(row.CHUNK_COUNT ?? "")}`);
       }
       console.log();
     }

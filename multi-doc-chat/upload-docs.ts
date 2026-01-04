@@ -179,8 +179,16 @@ const embedModel = {
 let llmCallCount = 0;
 let totalTriplets = 0;
 
+type SafeParseResult<T> =
+  | { success: true; data: T }
+  | { success: false; error: unknown };
+
+type SafeParseSchema<T> = {
+  safeParse: (input: unknown) => SafeParseResult<T>;
+};
+
 const llmClient = {
-  async structuredPredict<T>(schema: import("zod").ZodType<T>, prompt: string): Promise<T> {
+  async structuredPredict<T>(schema: SafeParseSchema<T>, prompt: string): Promise<T> {
     const callNum = ++llmCallCount;
     
     let lastError: Error | null = null;

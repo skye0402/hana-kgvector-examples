@@ -95,6 +95,21 @@ let documentFilter: string[] = [];
 // Store connection for direct queries
 let hanaConn: any = null;
 
+type HanaExecResultRow = Record<string, unknown>;
+
+async function hanaExec(conn: any, sql: string, params: unknown[] = []): Promise<HanaExecResultRow[]> {
+  const maybePromise = conn.exec(sql, params);
+  if (maybePromise && typeof (maybePromise as any).then === "function") {
+    return (await maybePromise) as HanaExecResultRow[];
+  }
+  return await new Promise<HanaExecResultRow[]>((resolve, reject) => {
+    conn.exec(sql, params, (err: unknown, result: unknown) => {
+      if (err) reject(err);
+      else resolve((result as HanaExecResultRow[] | null | undefined) ?? []);
+    });
+  });
+}
+
 /**
  * Direct vector search on GRAPH_NODES table (source chunks)
  * This finds content that may not have produced KG entities (like image descriptions)
@@ -116,12 +131,7 @@ async function directSourceChunkSearch(
   `;
   
   try {
-    const rows = await new Promise<any[]>((resolve, reject) => {
-      hanaConn.exec(sql, [JSON.stringify(queryEmbedding), topK], (err: any, result: any) => {
-        if (err) reject(err);
-        else resolve(result ?? []);
-      });
-    });
+    const rows = await hanaExec(hanaConn, sql, [JSON.stringify(queryEmbedding), topK]);
     
     return rows.map((r: any) => ({
       node: {
