@@ -25,7 +25,7 @@ import * as readline from "readline";
 dotenv.config({ path: ".env.local" });
 
 // Configuration
-const GRAPH_NAME = "multi_doc_graph";
+const GRAPH_NAME = process.env.GRAPH_NAME || "MULTI_DOC_GRAPH";
 const EMBEDDING_MODEL = process.env.DEFAULT_EMBEDDING_MODEL || "text-embedding-3-small";
 
 const DEFAULT_QUERY_OPTIONS = {
@@ -91,92 +91,6 @@ const embedModel = {
 
 // Document filter state
 let documentFilter: string[] = [];
-
-// Store connection for direct queries
-let hanaConn: any = null;
-
-type HanaExecResultRow = Record<string, unknown>;
-
-async function hanaExec(conn: any, sql: string, params: unknown[] = []): Promise<HanaExecResultRow[]> {
-  const maybePromise = conn.exec(sql, params);
-  if (maybePromise && typeof (maybePromise as any).then === "function") {
-    return (await maybePromise) as HanaExecResultRow[];
-  }
-  return await new Promise<HanaExecResultRow[]>((resolve, reject) => {
-    conn.exec(sql, params, (err: unknown, result: unknown) => {
-      if (err) reject(err);
-      else resolve((result as HanaExecResultRow[] | null | undefined) ?? []);
-    });
-  });
-}
-
-/**
- * Direct vector search on GRAPH_NODES table (source chunks)
- * This finds content that may not have produced KG entities (like image descriptions)
- */
-async function directSourceChunkSearch(
-  queryEmbedding: number[],
-  topK: number = 10
-): Promise<any[]> {
-  if (!hanaConn) return [];
-  
-  const nodesTable = `"${GRAPH_NAME}_NODES"`;
-  const sql = `
-    SELECT ID, TEXT, METADATA,
-      COSINE_SIMILARITY(EMBEDDING, TO_REAL_VECTOR(?)) AS SCORE
-    FROM ${nodesTable}
-    WHERE EMBEDDING IS NOT NULL
-    ORDER BY SCORE DESC
-    LIMIT ?
-  `;
-  
-  try {
-    const rows = await hanaExec(hanaConn, sql, [JSON.stringify(queryEmbedding), topK]);
-    
-    return rows.map((r: any) => ({
-      node: {
-        id: r.ID,
-        text: r.TEXT,
-        metadata: JSON.parse(r.METADATA || "{}"),
-      },
-      score: r.SCORE,
-    }));
-  } catch (error) {
-    // Table might not exist or other error - fall back gracefully
-    return [];
-  }
-}
-
-/**
- * Merge and deduplicate results from KG retrieval and direct chunk search
- */
-function mergeResults(kgResults: any[], chunkResults: any[]): any[] {
-  const seen = new Set<string>();
-  const merged: any[] = [];
-  
-  // Add KG results first (they have graph context)
-  for (const r of kgResults) {
-    const key = r.node?.text?.slice(0, 200) || r.node?.id;
-    if (!seen.has(key)) {
-      seen.add(key);
-      merged.push(r);
-    }
-  }
-  
-  // Add chunk results that aren't duplicates
-  for (const r of chunkResults) {
-    const key = r.node?.text?.slice(0, 200) || r.node?.id;
-    if (!seen.has(key)) {
-      seen.add(key);
-      merged.push(r);
-    }
-  }
-  
-  // Sort by score descending
-  merged.sort((a, b) => (b.score || 0) - (a.score || 0));
-  
-  return merged;
-}
 
 function shouldDropContextLine(line: string): boolean {
   const t = (line ?? "").toLowerCase();
@@ -252,14 +166,13 @@ async function generateResponse(
     .map(([doc, count]) => `${doc} (${count} passages)`)
     .join(", ");
   
-  const systemPrompt = `You are a helpful assistant that answers questions based on the provided document context.
-The context comes from MULTIPLE documents and may include both text passages and IMAGE DESCRIPTIONS.
-When answering:
-1. Synthesize information from all relevant documents
-2. If documents have conflicting information, mention both perspectives
-3. Cite which document(s) support each part of your answer when relevant
-4. If information comes from an image description, mention that (e.g., "According to the diagram...")
-5. If the answer is only in one document, mention that
+  const systemPrompt = `You are a helpful assistant that answers questions based only on the provided document context.
+If the user asks for a list of "options", "types", "ways", or "steps", enumerate ALL items that appear in the context.
+Do not omit items that are present.
+If information is not present in the context, say it is not present.
+
+The context may come from MULTIPLE documents and may include both text passages and IMAGE DESCRIPTIONS.
+If information comes from an image description, mention that (e.g., "According to the diagram...").
 
 Documents in context: ${sourceList}
 Context includes: ${textCount} text passages, ${imageCount} image descriptions`;
@@ -322,7 +235,6 @@ async function main() {
     user: process.env.HANA_USER!,
     password: process.env.HANA_PASSWORD!,
   });
-  hanaConn = conn; // Store for direct queries
   console.log("   ✅ Connected");
   
   // Initialize graph store and index
@@ -443,14 +355,8 @@ async function main() {
         
         try {
           console.log("\n🔍 Comparing across documents...");
-          
-          // Hybrid search for compare too
-          const queryEmbedding = await embedModel.getTextEmbedding(topic);
-          const [kgResults, chunkResults] = await Promise.all([
-            index.query(topic, DEFAULT_QUERY_OPTIONS),
-            directSourceChunkSearch(queryEmbedding, 15),
-          ]);
-          const results = mergeResults(kgResults, chunkResults);
+
+          const results = await index.query(topic, DEFAULT_QUERY_OPTIONS);
           const sources = getDocumentSources(results);
           lastSources = sources;
           
@@ -475,20 +381,10 @@ async function main() {
       }
       
       try {
-        // Query the knowledge graph + direct source chunk search (hybrid)
+        // Query the knowledge graph
         console.log("\n🔍 Searching...");
-        
-        // Get query embedding for direct chunk search
-        const queryEmbedding = await embedModel.getTextEmbedding(query);
-        
-        // Run both searches in parallel
-        const [kgResults, chunkResults] = await Promise.all([
-          index.query(query, DEFAULT_QUERY_OPTIONS),
-          directSourceChunkSearch(queryEmbedding, 15),
-        ]);
-        
-        // Merge results (KG results first, then direct chunk matches)
-        let results = mergeResults(kgResults, chunkResults);
+
+        let results = await index.query(query, DEFAULT_QUERY_OPTIONS);
         
         // Apply document filter if set
         if (documentFilter.length > 0) {

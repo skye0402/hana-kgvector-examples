@@ -30,7 +30,7 @@ import { createCanvas } from "@napi-rs/canvas";
 dotenv.config({ path: ".env.local" });
 
 // Configuration
-const GRAPH_NAME = "MULTI_DOC_GRAPH";
+const GRAPH_NAME = process.env.GRAPH_NAME || "MULTI_DOC_GRAPH";
 const IMAGE_TABLE_NAME = `${GRAPH_NAME}_IMAGES`;
 const CHUNK_SIZE = 1000;
 const CHUNK_OVERLAP = 100;
@@ -38,6 +38,9 @@ const SCHEMA_SAMPLE_PAGES = 6;
 const TRIPLETS_PER_CHUNK = 100;
 const MIN_IMAGE_SIZE = 100; // Skip images smaller than 100x100 (likely icons/noise)
 const IMAGES_OUTPUT_DIR = "./extracted_images"; // Local folder for extracted images
+
+// Pass --no-images to skip image extraction + VLM (faster upload)
+const PROCESS_IMAGES = !process.argv.includes("--no-images");
 
 // Pass --reset to clear existing data
 const RESET_TABLES = process.argv.includes("--reset");
@@ -315,7 +318,7 @@ interface PdfData {
  * Extract text and images from PDF using pdfjs-dist
  * Images are extracted with coordinates for proper reading order
  */
-async function extractPdfContent(pdfPath: string, documentName: string): Promise<PdfData> {
+async function extractPdfContent(pdfPath: string, documentName: string, extractImages: boolean): Promise<PdfData> {
   if (!fs.existsSync(pdfPath)) {
     throw new Error(`PDF file not found: ${pdfPath}`);
   }
@@ -337,9 +340,8 @@ async function extractPdfContent(pdfPath: string, documentName: string): Promise
   const allContentItems: ContentItem[] = [];
   const allImages: ContentItem[] = [];
   
-  // Ensure output directory exists
   const docImageDir = path.join(IMAGES_OUTPUT_DIR, documentName);
-  if (!fs.existsSync(docImageDir)) {
+  if (extractImages && !fs.existsSync(docImageDir)) {
     fs.mkdirSync(docImageDir, { recursive: true });
   }
   
@@ -367,94 +369,95 @@ async function extractPdfContent(pdfPath: string, documentName: string): Promise
     const pageText = textItems.map(t => t.content).join(" ");
     pages.push(pageText);
     
-    // --- Extract Images ---
-    const ops = await page.getOperatorList();
     const imageItems: ContentItem[] = [];
-    
-    // Track transformation matrix for image positions
-    let currentMatrix = [1, 0, 0, 1, 0, 0];
-    
-    for (let j = 0; j < ops.fnArray.length; j++) {
-      const fn = ops.fnArray[j];
-      const args = ops.argsArray[j];
+    if (extractImages) {
+      // --- Extract Images ---
+      const ops = await page.getOperatorList();
       
-      // Update transform matrix
-      if (fn === pdfjs.OPS.transform && args.length >= 6) {
-        currentMatrix = [args[0], args[1], args[2], args[3], args[4], viewport.height - args[5]];
-      }
+      // Track transformation matrix for image positions
+      let currentMatrix = [1, 0, 0, 1, 0, 0];
       
-      // Check for image painting operation
-      if (fn === pdfjs.OPS.paintImageXObject) {
-        const imgName = args[0];
+      for (let j = 0; j < ops.fnArray.length; j++) {
+        const fn = ops.fnArray[j];
+        const args = ops.argsArray[j];
         
-        try {
-          const imgObj = await page.objs.get(imgName);
+        // Update transform matrix
+        if (fn === pdfjs.OPS.transform && args.length >= 6) {
+          currentMatrix = [args[0], args[1], args[2], args[3], args[4], viewport.height - args[5]];
+        }
+        
+        // Check for image painting operation
+        if (fn === pdfjs.OPS.paintImageXObject) {
+          const imgName = args[0];
           
-          if (imgObj && imgObj.width && imgObj.height && imgObj.data) {
-            const width = imgObj.width;
-            const height = imgObj.height;
-            
-            // Skip small images (likely icons or decorations)
-            if (width < MIN_IMAGE_SIZE || height < MIN_IMAGE_SIZE) continue;
-            
-            // Create canvas and draw image
-            const canvas = createCanvas(width, height);
-            const ctx = canvas.getContext("2d");
-            const imgData = ctx.createImageData(width, height);
-            
-            // Handle different image kinds
-            // kind: 1 = GRAYSCALE, 2 = RGB, 3 = RGBA
-            const kind = imgObj.kind || 3;
-            const srcData = imgObj.data;
-            
-            if (kind === 1) {
-              // Grayscale to RGBA
-              for (let i = 0, j = 0; i < srcData.length; i++, j += 4) {
-                imgData.data[j] = srcData[i];
-                imgData.data[j + 1] = srcData[i];
-                imgData.data[j + 2] = srcData[i];
-                imgData.data[j + 3] = 255;
+          try {
+            // Get image object
+            const imgObj = await page.objs.get(imgName);
+            if (imgObj && imgObj.data) {
+              const width = imgObj.width;
+              const height = imgObj.height;
+              
+              // Skip small images (likely icons or decorations)
+              if (width < MIN_IMAGE_SIZE || height < MIN_IMAGE_SIZE) continue;
+              
+              // Create canvas and draw image
+              const canvas = createCanvas(width, height);
+              const ctx = canvas.getContext("2d");
+              const imgData = ctx.createImageData(width, height);
+              
+              // Handle different image kinds
+              // kind: 1 = GRAYSCALE, 2 = RGB, 3 = RGBA
+              const kind = imgObj.kind || 3;
+              const srcData = imgObj.data;
+              
+              for (let k = 0, p = 0; k < srcData.length; ) {
+                if (kind === 1) {
+                  // Grayscale
+                  const v = srcData[k++];
+                  imgData.data[p++] = v;
+                  imgData.data[p++] = v;
+                  imgData.data[p++] = v;
+                  imgData.data[p++] = 255;
+                } else if (kind === 2) {
+                  // RGB
+                  imgData.data[p++] = srcData[k++];
+                  imgData.data[p++] = srcData[k++];
+                  imgData.data[p++] = srcData[k++];
+                  imgData.data[p++] = 255;
+                } else {
+                  // RGBA
+                  imgData.data[p++] = srcData[k++];
+                  imgData.data[p++] = srcData[k++];
+                  imgData.data[p++] = srcData[k++];
+                  imgData.data[p++] = srcData[k++];
+                }
               }
-            } else if (kind === 2) {
-              // RGB to RGBA
-              for (let i = 0, j = 0; i < srcData.length; i += 3, j += 4) {
-                imgData.data[j] = srcData[i];
-                imgData.data[j + 1] = srcData[i + 1];
-                imgData.data[j + 2] = srcData[i + 2];
-                imgData.data[j + 3] = 255;
-              }
-            } else {
-              // RGBA - direct copy
-              for (let i = 0; i < srcData.length; i++) {
-                imgData.data[i] = srcData[i];
-              }
+              
+              ctx.putImageData(imgData, 0, 0);
+              
+              // Save image to file
+              const imageId = `${documentName}_p${pageNum}_${imgName}`;
+              const fileName = `${imageId}.png`;
+              const filePath = path.join(docImageDir, fileName);
+              const buffer = canvas.toBuffer("image/png");
+              fs.writeFileSync(filePath, buffer);
+              
+              imageItems.push({
+                type: "image",
+                content: "", // Will be filled with VLM description later
+                pageNumber: pageNum,
+                y: currentMatrix[5],
+                x: currentMatrix[4],
+                imagePath: filePath,
+                imageId,
+                imageWidth: width,
+                imageHeight: height,
+                imageData: buffer,
+              });
             }
-            
-            ctx.putImageData(imgData, 0, 0);
-            
-            // Save image to file
-            const imageId = `${documentName}_p${pageNum}_${imgName}`;
-            const fileName = `${imageId}.png`;
-            const filePath = path.join(docImageDir, fileName);
-            const buffer = canvas.toBuffer("image/png");
-            fs.writeFileSync(filePath, buffer);
-            
-            imageItems.push({
-              type: "image",
-              content: "", // Will be filled with VLM description later
-              pageNumber: pageNum,
-              y: currentMatrix[5],
-              x: currentMatrix[4],
-              imagePath: filePath,
-              imageId,
-              imageWidth: width,
-              imageHeight: height,
-              imageData: buffer,
-            });
+          } catch {
+            // Ignore image extraction errors
           }
-        } catch (e) {
-          // Skip images that fail to extract
-          continue;
         }
       }
     }
@@ -698,7 +701,7 @@ async function main() {
     const name = path.basename(pdfPath, ".pdf");
     console.log(`   📄 ${name}:`);
     try {
-      const data = await extractPdfContent(pdfPath, name);
+      const data = await extractPdfContent(pdfPath, name, PROCESS_IMAGES);
       pdfDataList.push({ path: pdfPath, name, data });
       console.log(`      ✅ ${data.numPages} pages, ${data.text.length} chars, ${data.images.length} images`);
     } catch (error: any) {
@@ -722,8 +725,10 @@ async function main() {
   console.log("   ✅ Connected");
   
   // 2b. Create image BLOB table
-  console.log(`\n🖼️  Setting up image storage table`);
-  await createImageTable(conn);
+  if (PROCESS_IMAGES) {
+    console.log(`\n🖼️  Setting up image storage table`);
+    await createImageTable(conn);
+  }
   
   // 3. Create graph store
   console.log(`\n🗄️  Initializing graph store (graph: ${GRAPH_NAME})`);
@@ -764,8 +769,8 @@ async function main() {
     console.log(`${"─".repeat(70)}`);
     
     // 6a. Process images - generate descriptions and store in HANA
-    const imageCount = pdf.data.images.length;
-    if (imageCount > 0) {
+    const imageCount = PROCESS_IMAGES ? pdf.data.images.length : 0;
+    if (PROCESS_IMAGES && imageCount > 0) {
       console.log(`   🖼️ Processing ${imageCount} images...`);
       
       for (let i = 0; i < pdf.data.images.length; i++) {
@@ -820,7 +825,7 @@ async function main() {
     });
     
     // 6d. Create image description documents (these become searchable chunks)
-    const imageDocuments: Array<{ id: string; text: string; metadata: Record<string, unknown> }> = pdf.data.images.map((img, idx) => ({
+    const imageDocuments: Array<{ id: string; text: string; metadata: Record<string, unknown> }> = PROCESS_IMAGES ? pdf.data.images.map((img, idx) => ({
       id: `${pdf.name}_image_${idx}`,
       text: `[Image on page ${img.pageNumber}]\n${img.content}`,
       metadata: {
@@ -834,7 +839,7 @@ async function main() {
         imageWidth: img.imageWidth,
         imageHeight: img.imageHeight,
       },
-    }));
+    })) : [];
     
     // 6e. Combine text and image documents
     const allDocuments: Array<{ id: string; text: string; metadata: Record<string, unknown> }> = [...documents, ...imageDocuments];

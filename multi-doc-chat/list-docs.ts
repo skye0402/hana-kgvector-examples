@@ -13,7 +13,7 @@ import dotenv from "dotenv";
 
 dotenv.config({ path: ".env.local" });
 
-const GRAPH_NAME = "multi_doc_graph";
+const GRAPH_NAME = process.env.GRAPH_NAME || "MULTI_DOC_GRAPH";
 
 type HanaExecResultRow = Record<string, unknown>;
 
