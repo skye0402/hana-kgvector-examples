@@ -11,12 +11,13 @@ Interactive visualization of Knowledge Graph RAG retrieval. Query your documents
   - Entity relationships as edges
   - Color-coded entity types
   - Interactive zoom, pan, and drag
-- 📊 **Retrieval Stats**: View vector matches, triplet counts, and more
+- 🖼️ **Image Display**: View images found in context with thumbnails
+- 📊 **Retrieval Stats**: View vector matches, triplet counts, image counts, and more
 
 ## Prerequisites
 
-1. **Uploaded PDF data**: Run `pnpm upload` in the `pdf-chat` folder first
-2. **Environment configured**: The `.env.local` file in `pdf-chat` with HANA and LLM credentials
+1. **Uploaded documents**: Run `pnpm upload` in the `multi-doc-chat` folder first
+2. **Environment configured**: The `.env.local` file in `multi-doc-chat` with HANA and LLM credentials
 
 ## Setup
 
@@ -118,8 +119,8 @@ Edit the `TYPE_COLORS` object in `server/index.ts` to customize entity type colo
 
 ### "Database not connected"
 
-- Ensure `pdf-chat/.env.local` exists with valid HANA credentials
-- Run `pnpm upload` in `pdf-chat` first to create the graph
+- Ensure `multi-doc-chat/.env.local` exists with valid HANA credentials
+- Run `pnpm upload` in `multi-doc-chat` first to create the graph
 
 ### "No graph displayed"
 
@@ -131,3 +132,9 @@ Edit the `TYPE_COLORS` object in `server/index.ts` to customize entity type colo
 
 - Reduce `limit` in `getRelMap` call
 - Reduce `pathDepth` for shallower traversal
+
+### Images not displaying
+
+- Ensure extracted images exist in `multi-doc-chat/extracted_images/`
+- Check browser console for 404 errors on image paths
+- Verify the image table exists and has entries

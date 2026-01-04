@@ -3,11 +3,15 @@
  * 
  * Express server that queries the HANA knowledge graph and returns
  * structured data for visualization.
+ * 
+ * Updated for multi-doc-chat with image support.
  */
 
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
+import path from "path";
+import { fileURLToPath } from "url";
 import OpenAI from "openai";
 import {
   createHanaConnection,
@@ -15,16 +19,25 @@ import {
   PropertyGraphIndex,
   ImplicitPathExtractor,
   KG_SOURCE_REL,
+  hanaExec,
 } from "hana-kgvector";
 
-dotenv.config({ path: "../pdf-chat/.env.local" });
+// Load config from multi-doc-chat
+dotenv.config({ path: "../multi-doc-chat/.env.local" });
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
+// Serve extracted images as static files
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const IMAGES_DIR = path.resolve(__dirname, "../../multi-doc-chat/extracted_images");
+app.use("/images", express.static(IMAGES_DIR));
+
 const PORT = process.env.PORT || 3001;
-const GRAPH_NAME = "pdf_documents";
+const GRAPH_NAME = process.env.GRAPH_NAME || "MULTI_DOC_GRAPH";
+const IMAGE_TABLE_NAME = `${GRAPH_NAME}_IMAGES`;
 const EMBEDDING_MODEL = process.env.DEFAULT_EMBEDDING_MODEL || "text-embedding-3-small";
 
 // Initialize OpenAI client
@@ -63,12 +76,13 @@ const embedModel = {
 };
 
 // Store connection and index globally
+let conn: any = null;
 let graphStore: HanaPropertyGraphStore | null = null;
 let index: PropertyGraphIndex | null = null;
 
 async function initializeConnection() {
   console.log("🔌 Connecting to HANA Cloud...");
-  const conn = await createHanaConnection({
+  conn = await createHanaConnection({
     host: process.env.HANA_HOST!,
     port: parseInt(process.env.HANA_PORT || "443"),
     user: process.env.HANA_USER!,
@@ -84,6 +98,8 @@ async function initializeConnection() {
   });
   
   console.log("✅ Connected to HANA Cloud");
+  console.log(`   Graph: ${GRAPH_NAME}`);
+  console.log(`   Images dir: ${IMAGES_DIR}`);
 }
 
 // Entity type to color mapping
@@ -122,6 +138,14 @@ interface GraphLink {
   label: string;
 }
 
+interface ImageInfo {
+  imageId: string;
+  pageNumber: number;
+  documentId: string;
+  imagePath: string;  // URL path to serve the image
+  description: string;
+}
+
 interface QueryResponse {
   answer: string;
   graph: {
@@ -129,11 +153,13 @@ interface QueryResponse {
     links: GraphLink[];
   };
   vectorMatches: Array<{ id: string; name: string; label: string; score: number }>;
+  images: ImageInfo[];
   stats: {
     vectorMatchCount: number;
     tripletCount: number;
     nodeCount: number;
     edgeCount: number;
+    imageCount: number;
   };
 }
 
@@ -236,22 +262,68 @@ app.post("/api/query", async (req, res) => {
     
     console.log(`   Graph: ${nodes.length} nodes, ${links.length} edges`);
     
-    // 5. Get answer from index
+    // 5. Get answer from index (with structural edges for image retrieval)
     const results = await index.query(query, {
       similarityTopK: 5,
       pathDepth: 2,
       limit: 30,
       crossCheckBoost: true,
       crossCheckBoostFactor: 1.25,
-    });
+      // Note: includeStructuralEdges requires hana-kgvector >= 0.1.8
+    } as any);
     
-    // 6. Generate AI response
+    // 6. Extract images from results
+    const images: ImageInfo[] = [];
+    const seenImageIds = new Set<string>();
+    
+    for (const r of results) {
+      const meta = r?.node?.metadata as any;
+      if (meta?.contentType === "image" && meta?.imageId && !seenImageIds.has(meta.imageId)) {
+        seenImageIds.add(meta.imageId);
+        
+        // Look up image path from _IMAGES table
+        let imagePath = meta.imagePath || "";
+        try {
+          const imgRows: any = await hanaExec(conn, 
+            `SELECT IMAGE_PATH FROM "${IMAGE_TABLE_NAME}" WHERE IMAGE_ID = '${meta.imageId}'`
+          );
+          if (imgRows?.[0]?.IMAGE_PATH) {
+            // Convert local path to URL path (e.g., extracted_images/DOC/img.png -> /images/DOC/img.png)
+            const localPath = imgRows[0].IMAGE_PATH;
+            imagePath = "/images/" + localPath.replace(/^.*extracted_images[\/\\]/, "");
+          }
+        } catch {
+          // Use metadata path as fallback
+          if (imagePath) {
+            imagePath = "/images/" + imagePath.replace(/^.*extracted_images[\/\\]/, "");
+          }
+        }
+        
+        images.push({
+          imageId: meta.imageId,
+          pageNumber: meta.pageNumber || 0,
+          documentId: meta.documentId || "unknown",
+          imagePath,
+          description: r.node.text || "",
+        });
+      }
+    }
+    
+    console.log(`   Images found: ${images.length}`);
+    
+    // 7. Generate AI response
     let answer = "I don't have enough information to answer that question.";
     
     if (results.length > 0) {
       const context = results
         .slice(0, 8)
-        .map((r, i) => `[${i + 1}] ${r.node.text}`)
+        .map((r, i) => {
+          const meta = r?.node?.metadata as any;
+          const prefix = meta?.contentType === "image" 
+            ? `[${i + 1}] [IMAGE: ${meta?.imageId || "unknown"}] ` 
+            : `[${i + 1}] `;
+          return prefix + r.node.text;
+        })
         .join("\n\n");
       
       const response = await openai.chat.completions.create({
@@ -259,7 +331,7 @@ app.post("/api/query", async (req, res) => {
         messages: [
           {
             role: "system",
-            content: "You are a helpful assistant that answers questions based only on the provided document context. Be concise.",
+            content: "You are a helpful assistant that answers questions based only on the provided document context. When referring to images, include their ID (e.g., 'Image ID: xxx'). Be concise.",
           },
           {
             role: "user",
@@ -276,11 +348,13 @@ app.post("/api/query", async (req, res) => {
       answer,
       graph: { nodes, links },
       vectorMatches,
+      images,
       stats: {
         vectorMatchCount: vectorMatches.length,
         tripletCount: semanticTriplets.length,
         nodeCount: nodes.length,
         edgeCount: links.length,
+        imageCount: images.length,
       },
     };
     

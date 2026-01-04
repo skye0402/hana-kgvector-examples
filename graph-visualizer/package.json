@@ -1,7 +1,7 @@
 {
   "name": "graph-visualizer",
   "version": "1.0.0",
-  "description": "Interactive KG-RAG visualization for PDF documents",
+  "description": "Interactive KG-RAG visualization for multi-document chat with image support",
   "type": "module",
   "scripts": {
     "dev": "concurrently \"npm run server\" \"npm run client\"",
@@ -14,11 +14,13 @@
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
     "express": "^4.18.2",
-    "hana-kgvector": "^0.1.6",
+    "hana-kgvector": "^0.1.8",
     "openai": "^4.20.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "react-force-graph-2d": "^1.25.0"
+    "react-force-graph-2d": "^1.25.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",

@@ -1,5 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import ForceGraph2D from 'react-force-graph-2d';
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 interface GraphNode {
   id: string;
@@ -30,15 +32,25 @@ interface VectorMatch {
   score: number;
 }
 
+interface ImageInfo {
+  imageId: string;
+  pageNumber: number;
+  documentId: string;
+  imagePath: string;
+  description: string;
+}
+
 interface QueryResponse {
   answer: string;
   graph: GraphData;
   vectorMatches: VectorMatch[];
+  images: ImageInfo[];
   stats: {
     vectorMatchCount: number;
     tripletCount: number;
     nodeCount: number;
     edgeCount: number;
+    imageCount: number;
   };
 }
 
@@ -239,7 +251,9 @@ function App() {
             
             {result ? (
               <div className="prose prose-invert prose-sm max-w-none">
-                <p className="text-slate-300 whitespace-pre-wrap">{result.answer}</p>
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                  {result.answer}
+                </ReactMarkdown>
               </div>
             ) : (
               <p className="text-slate-500 italic">
@@ -283,6 +297,38 @@ function App() {
                     <span className="text-yellow-400 font-mono">{(match.score * 100).toFixed(1)}%</span>
                     <span className="px-2 py-0.5 bg-slate-600 rounded text-xs text-slate-300">{match.label}</span>
                     <span className="text-white truncate">{match.name}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Images Found in Context */}
+          {result && result.images && result.images.length > 0 && (
+            <div className="border-t border-slate-700 p-4 bg-slate-800/50 overflow-auto" style={{ maxHeight: '400px' }}>
+              <h3 className="text-sm font-semibold text-slate-400 mb-3">🖼️ Images in Context ({result.images.length})</h3>
+              <div className="space-y-4">
+                {result.images.map((img) => (
+                  <div key={img.imageId} className="bg-slate-700/50 rounded-lg p-3">
+                    <div className="text-xs text-slate-400 mb-2">
+                      <span className="font-mono">{img.imageId}</span>
+                      <span className="mx-2">•</span>
+                      <span>Page {img.pageNumber}</span>
+                      <span className="mx-2">•</span>
+                      <span>{img.documentId}</span>
+                    </div>
+                    {img.imagePath && (
+                      <img 
+                        src={img.imagePath} 
+                        alt={img.description.slice(0, 100)}
+                        className="w-full rounded border border-slate-600 mb-2 cursor-pointer hover:opacity-90 transition-opacity"
+                        onClick={() => window.open(img.imagePath, '_blank')}
+                        onError={(e) => {
+                          (e.target as HTMLImageElement).style.display = 'none';
+                        }}
+                      />
+                    )}
+                    <p className="text-xs text-slate-300 line-clamp-3">{img.description.replace(/^\[Image on page \d+\]\n?/, '')}</p>
                   </div>
                 ))}
               </div>
