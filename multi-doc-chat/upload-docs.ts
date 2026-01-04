@@ -20,6 +20,7 @@ import {
   PropertyGraphIndex,
   SchemaLLMPathExtractor,
   ImplicitPathExtractor,
+  AdjacencyLinker,
 } from "hana-kgvector";
 import OpenAI from "openai";
 import dotenv from "dotenv";
@@ -56,9 +57,11 @@ Examples:
   pnpm upload doc1.pdf doc2.pdf
   pnpm upload ./docs/*.pdf
   pnpm upload doc1.pdf --reset    # Clear existing data first
+  pnpm upload doc1.pdf --no-images # Skip image extraction + VLM
 
 Options:
   --reset    Clear all existing documents before uploading
+  --no-images  Skip image extraction + vision LLM descriptions (faster)
 `);
   process.exit(1);
 }
@@ -79,6 +82,38 @@ const embeddingCache = new Map<string, number[]>();
 
 async function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function getPdfJsImageObject(page: any, name: string): Promise<any | null> {
+  const objs = page?.objs;
+  if (!objs || typeof objs.get !== "function") return null;
+
+  if (objs.get.length >= 2) {
+    return await new Promise((resolve) => {
+      try {
+        objs.get(name, (data: unknown) => resolve(data ?? null));
+      } catch {
+        resolve(null);
+      }
+    });
+  }
+
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    try {
+      const obj = objs.get(name);
+      if (obj) return obj;
+    } catch (e: any) {
+      const msg = String(e?.message ?? e ?? "");
+      if (msg.toLowerCase().includes("isn't resolved") || msg.toLowerCase().includes("not resolved")) {
+        await sleep(50 * attempt);
+        continue;
+      }
+      return null;
+    }
+    await sleep(20 * attempt);
+  }
+
+  return null;
 }
 
 const embedModel = {
@@ -373,6 +408,11 @@ async function extractPdfContent(pdfPath: string, documentName: string, extractI
     if (extractImages) {
       // --- Extract Images ---
       const ops = await page.getOperatorList();
+
+      const OPS: any = pdfjs.OPS as any;
+      const OP_PAINT_IMAGE_XOBJECT = OPS.paintImageXObject;
+      const OP_PAINT_JPEG_XOBJECT = OPS.paintJpegXObject;
+      const OP_PAINT_INLINE_IMAGE = OPS.paintInlineImageXObject;
       
       // Track transformation matrix for image positions
       let currentMatrix = [1, 0, 0, 1, 0, 0];
@@ -386,13 +426,17 @@ async function extractPdfContent(pdfPath: string, documentName: string, extractI
           currentMatrix = [args[0], args[1], args[2], args[3], args[4], viewport.height - args[5]];
         }
         
-        // Check for image painting operation
-        if (fn === pdfjs.OPS.paintImageXObject) {
-          const imgName = args[0];
-          
+        const isPaintImage =
+          (typeof OP_PAINT_IMAGE_XOBJECT === "number" && fn === OP_PAINT_IMAGE_XOBJECT) ||
+          (typeof OP_PAINT_JPEG_XOBJECT === "number" && fn === OP_PAINT_JPEG_XOBJECT) ||
+          (typeof OP_PAINT_INLINE_IMAGE === "number" && fn === OP_PAINT_INLINE_IMAGE);
+
+        if (isPaintImage) {
+          const isInline = typeof OP_PAINT_INLINE_IMAGE === "number" && fn === OP_PAINT_INLINE_IMAGE;
+          const imgName = isInline ? `inline_${pageNum}_${j}` : args[0];
+
           try {
-            // Get image object
-            const imgObj = await page.objs.get(imgName);
+            const imgObj = isInline ? args[0] : await getPdfJsImageObject(page, imgName);
             if (imgObj && imgObj.data) {
               const width = imgObj.width;
               const height = imgObj.height;
@@ -436,7 +480,7 @@ async function extractPdfContent(pdfPath: string, documentName: string, extractI
               ctx.putImageData(imgData, 0, 0);
               
               // Save image to file
-              const imageId = `${documentName}_p${pageNum}_${imgName}`;
+              const imageId = `${documentName}_p${pageNum}_${imgName}_${j}`;
               const fileName = `${imageId}.png`;
               const filePath = path.join(docImageDir, fileName);
               const buffer = canvas.toBuffer("image/png");
@@ -692,6 +736,18 @@ async function main() {
   if (RESET_TABLES) {
     console.log("\n⚠️  --reset flag: Will clear existing graph data");
   }
+
+  if (RESET_TABLES && PROCESS_IMAGES) {
+    try {
+      if (fs.existsSync(IMAGES_OUTPUT_DIR)) {
+        fs.rmSync(IMAGES_OUTPUT_DIR, { recursive: true, force: true });
+      }
+      fs.mkdirSync(IMAGES_OUTPUT_DIR, { recursive: true });
+      console.log(`\n🧹 Cleared extracted images folder: ${IMAGES_OUTPUT_DIR}`);
+    } catch {
+      console.log(`\n⚠️  Failed to clear extracted images folder: ${IMAGES_OUTPUT_DIR}`);
+    }
+  }
   
   // 1. Extract text and images from all PDFs first
   console.log("\n📄 Extracting content from PDFs (text + images)...");
@@ -755,6 +811,14 @@ async function main() {
         strict: false,
       }),
       new ImplicitPathExtractor(),
+      // AdjacencyLinker creates structural edges (ON_SAME_PAGE, ADJACENT_TO) between chunks
+      // This enables images and other multimodal content to be retrieved via graph traversal
+      new AdjacencyLinker({
+        linkSamePage: true,      // Link chunks on the same page
+        linkAdjacent: true,      // Link sequential chunks by chunkIndex
+        adjacentDistance: 2,     // Reach neighbors up to 2 hops away (better text↔image bridging)
+        crossTypeOnly: false,    // Link all chunks to maintain graph connectivity
+      }),
     ],
     embedKgNodes: true,
     showProgress: true,

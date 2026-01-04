@@ -46,6 +46,9 @@ LITELLM_API_KEY=your-api-key
 
 DEFAULT_EMBEDDING_MODEL=text-embedding-3-small
 DEFAULT_LLM_MODEL=gpt-4
+
+# Optional: override graph name (must match upload + chat + list)
+GRAPH_NAME=MULTI_DOC_GRAPH
 ```
 
 ## Usage
@@ -61,6 +64,9 @@ pnpm upload ./docs/*.pdf
 
 # Clear existing data and upload fresh
 pnpm upload doc1.pdf doc2.pdf --reset
+
+# Faster upload (skip image extraction + VLM)
+pnpm upload doc1.pdf doc2.pdf --no-images
 ```
 
 **What happens:**
@@ -239,6 +245,60 @@ The "Describe & Embed" approach for handling images:
 
 This means you can search for "architecture diagram" or "flowchart showing the process" and find relevant images even though you're searching text.
 
+### Structural Adjacency Linking (v0.1.8+)
+
+Images and other multimodal content are made retrievable through **structural graph edges** that link chunks based on document position:
+
+1. **`ON_SAME_PAGE`**: Links chunks that share the same page number
+2. **`ADJACENT_TO`**: Links sequential chunks by their position in the document
+
+**How it works:**
+- During upload, `AdjacencyLinker` creates structural relations between CHUNK nodes
+- During query, the retriever traverses these edges after finding matched entities
+- If a query matches text near an image, the image chunk is pulled in via structural traversal
+
+**Example:**
+```
+Query: "What is the S/4HANA migration process?"
+       │
+       ▼
+1. Vector search finds entities: PRODUCT_S4HANA, FEATURE_MIGRATION
+2. Semantic expansion finds related entities
+3. Source chunks retrieved via TRIPLET_SOURCE_KEY
+4. Structural expansion follows ON_SAME_PAGE → finds image chunk on same page
+5. Image description included in results (with imageId for display)
+```
+
+**Configuration in upload-docs.ts:**
+```typescript
+new AdjacencyLinker({
+  linkSamePage: true,      // Link chunks on the same page
+  linkAdjacent: true,      // Link sequential chunks
+  adjacentDistance: 2,     // Include neighbors up to 2 hops away (better text↔image bridging)
+  crossTypeOnly: false,    // Link all chunks (set true for only text↔image)
+})
+```
+
+**Verifying triples / relations in HANA:**
+
+Triples for relations (including structural edges) are stored in the named graph `<${GRAPH_NAME}>`. To inspect them, use `SPARQL_TABLE(...)` (as used internally by `hana-kgvector`), for example:
+
+```sql
+SELECT * FROM SPARQL_TABLE('
+  SELECT (COUNT(*) AS ?cnt)
+  FROM <MULTI_DOC_GRAPH>
+  WHERE { ?s ?p ?o . }
+');
+```
+
+**Configuration in chat.ts:**
+```typescript
+const results = await index.query(query, {
+  includeStructuralEdges: true,  // Enable structural traversal
+  structuralDepth: 1,            // How deep to traverse structural edges
+});
+```
+
 ### Document Metadata
 
 Each chunk is tagged with document-level metadata:
@@ -320,10 +380,12 @@ The KG-RAG retrieval naturally finds related information across documents becaus
 
 ### Change Graph Name
 
-Edit `upload-docs.ts` and `chat.ts`:
+Set `GRAPH_NAME` in `.env.local`.
+
+Graph names are case-sensitive in HANA/SPARQL. Ensure the same value is used for upload + chat + list.
 
 ```typescript
-const GRAPH_NAME = "my_custom_graph";
+GRAPH_NAME=my_custom_graph
 ```
 
 ### Adjust Chunking

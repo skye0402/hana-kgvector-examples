@@ -17,6 +17,7 @@ import {
   HanaPropertyGraphStore,
   PropertyGraphIndex,
   ImplicitPathExtractor,
+  hanaExec,
 } from "hana-kgvector";
 import OpenAI from "openai";
 import dotenv from "dotenv";
@@ -34,6 +35,9 @@ const DEFAULT_QUERY_OPTIONS = {
   limit: 30,
   crossCheckBoost: true,
   crossCheckBoostFactor: 1.25,
+  // Structural edge traversal - enables retrieval of adjacent chunks (including images)
+  includeStructuralEdges: true,
+  structuralDepth: 1,
 };
 
 // Initialize OpenAI client
@@ -150,7 +154,10 @@ async function generateResponse(
       // Format source info
       let sourceInfo = `from: ${docId}`;
       if (pageNum) sourceInfo += `, page ${pageNum}`;
-      if (contentType === "image") sourceInfo += ", [IMAGE DESCRIPTION]";
+      if (contentType === "image") {
+        const imageId = r?.node?.metadata?.imageId;
+        sourceInfo += `, [IMAGE DESCRIPTION]${imageId ? `, ID: ${imageId}` : ""}`;
+      }
       
       return `[${i + 1}] (${sourceInfo})\n${cleaned}`;
     })
@@ -173,6 +180,7 @@ If information is not present in the context, say it is not present.
 
 The context may come from MULTIPLE documents and may include both text passages and IMAGE DESCRIPTIONS.
 If information comes from an image description, mention that (e.g., "According to the diagram...").
+Image descriptions often include a unique ID (e.g., "ID: doc_p1_img_1"). If the user asks for the image name or ID, provide this ID.
 
 Documents in context: ${sourceList}
 Context includes: ${textCount} text passages, ${imageCount} image descriptions`;
@@ -413,6 +421,29 @@ async function main() {
           console.log("\n📚 Sources:");
           for (const [doc, count] of sources.entries()) {
             console.log(`   • ${doc}: ${count} passages`);
+          }
+        }
+
+        // Show images found in context with file paths from _IMAGES table
+        const imageResults = results.filter(r => r?.node?.metadata?.contentType === "image");
+        if (imageResults.length > 0) {
+          console.log("\n🖼️  Images found in context:");
+          const uniqueImages = new Set();
+          for (const r of imageResults) {
+            const imgId = r?.node?.metadata?.imageId;
+            const pageNum = r?.node?.metadata?.pageNumber;
+            if (imgId && !uniqueImages.has(imgId)) {
+              // Look up image path from _IMAGES table
+              try {
+                const imgRows: any = await hanaExec(conn, `SELECT IMAGE_PATH FROM "${GRAPH_NAME}_IMAGES" WHERE IMAGE_ID = '${imgId}'`);
+                const imgPath = imgRows?.[0]?.IMAGE_PATH || "(path not found)";
+                console.log(`   • ${imgId} (page ${pageNum})`);
+                console.log(`     Path: ${imgPath}`);
+              } catch {
+                console.log(`   • ${imgId} (page ${pageNum})`);
+              }
+              uniqueImages.add(imgId);
+            }
           }
         }
         
