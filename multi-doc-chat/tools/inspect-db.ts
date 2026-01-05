@@ -29,6 +29,7 @@ async function main() {
   const args = process.argv.slice(2);
   const tableKey = args.includes("--table") ? args[args.indexOf("--table") + 1] : "nodes";
   const limit = args.includes("--limit") ? parseInt(args[args.indexOf("--limit") + 1]) : 10;
+  const summary = args.includes("--summary");
   
   if (!TABLE_TYPES[tableKey as keyof typeof TABLE_TYPES]) {
     console.error(`Invalid table type. Use: ${Object.keys(TABLE_TYPES).join(", ")}`);
@@ -55,6 +56,37 @@ async function main() {
     // 2. Get row count
     const countResult: any = await hanaExec(conn, `SELECT COUNT(*) as CNT FROM "${tableName}"`);
     console.log(`\n📈 Total rows: ${countResult[0].CNT}`);
+
+    if (summary) {
+      const columnNames = new Set<string>(columns.map((c: any) => String(c.COLUMN_NAME)));
+      const summarize = async (col: string, title: string) => {
+        if (!columnNames.has(col)) return;
+        const rows: any = await hanaExec(
+          conn,
+          `SELECT "${col}" as VALUE, COUNT(*) as CNT FROM "${tableName}" GROUP BY "${col}" ORDER BY CNT DESC LIMIT 50`
+        );
+        console.log(`\n📌 ${title} (top ${rows.length}):`);
+        console.table(rows);
+      };
+
+      const countNullEmpty = async (col: string, title: string) => {
+        if (!columnNames.has(col)) return;
+        const rows: any = await hanaExec(
+          conn,
+          `SELECT COUNT(*) as CNT FROM "${tableName}" WHERE "${col}" IS NULL OR TRIM("${col}") = ''`
+        );
+        const cnt = rows?.[0]?.CNT ?? 0;
+        console.log(`\n📌 ${title}: ${cnt}`);
+      };
+
+      await summarize("LABEL", "LABEL distribution");
+      await countNullEmpty("LABEL", "Rows with LABEL NULL/empty");
+      await summarize("CONTENT_TYPE", "CONTENT_TYPE distribution");
+      await summarize("DOCUMENT_ID", "DOCUMENT_ID distribution");
+      await summarize("NODE_TYPE", "NODE_TYPE distribution");
+
+      return;
+    }
 
     // 3. Get sample data (excluding heavy BLOB/VECTOR columns for display)
     const colList = columns

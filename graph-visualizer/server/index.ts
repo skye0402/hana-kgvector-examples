@@ -123,6 +123,10 @@ function getNodeColor(label: string): string {
   return TYPE_COLORS[label?.toUpperCase()] || TYPE_COLORS.DEFAULT;
 }
 
+function sqlStringLiteral(value: string): string {
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
 interface GraphNode {
   id: string;
   label: string;
@@ -218,6 +222,38 @@ app.post("/api/query", async (req, res) => {
       if (pred === "FROM_DOCUMENT") return false;
       return true;
     });
+
+    // Best-effort: if some nodes arrive with missing/UNKNOWN labels from traversal,
+    // look up their LABEL/NAME in the vectors table.
+    const tripletNodeIds = new Set<string>();
+    for (const t of semanticTriplets) {
+      const sId = t?.[0]?.id;
+      const oId = t?.[2]?.id;
+      if (sId) tripletNodeIds.add(String(sId));
+      if (oId) tripletNodeIds.add(String(oId));
+    }
+
+    const vectorLabelById = new Map<string, { label?: string; name?: string }>();
+    if (tripletNodeIds.size > 0) {
+      const ids = Array.from(tripletNodeIds).slice(0, 1000);
+      const inList = ids.map(sqlStringLiteral).join(", ");
+      try {
+        const rows: any = await hanaExec(
+          conn,
+          `SELECT ID, LABEL, NAME FROM "${GRAPH_NAME}_VECTORS" WHERE ID IN (${inList})`
+        );
+        for (const row of rows || []) {
+          const id = String(row?.ID ?? "");
+          if (!id) continue;
+          vectorLabelById.set(id, {
+            label: row?.LABEL ? String(row.LABEL) : undefined,
+            name: row?.NAME ? String(row.NAME) : undefined,
+          });
+        }
+      } catch {
+        // If lookup fails, keep best-effort labels from traversal.
+      }
+    }
     
     for (const triplet of semanticTriplets) {
       const [s, p, o] = triplet;
@@ -225,14 +261,21 @@ app.post("/api/query", async (req, res) => {
       const subjectId = s?.id || `s_${Math.random()}`;
       const objectId = o?.id || `o_${Math.random()}`;
       const predLabel = p?.label || p?.id || "RELATED_TO";
+
+      const subjFallback = vectorLabelById.get(String(subjectId));
+      const objFallback = vectorLabelById.get(String(objectId));
+      const subjLabel = (s?.label && s.label !== "UNKNOWN" ? s.label : subjFallback?.label) || "ENTITY";
+      const objLabel = (o?.label && o.label !== "UNKNOWN" ? o.label : objFallback?.label) || "ENTITY";
+      const subjName = (s?.name && s.name !== "Unknown" ? s.name : subjFallback?.name) || s?.id || "Unknown";
+      const objName = (o?.name && o.name !== "Unknown" ? o.name : objFallback?.name) || o?.id || "Unknown";
       
       // Add subject node
       if (!nodeMap.has(subjectId)) {
         nodeMap.set(subjectId, {
           id: subjectId,
-          label: s?.label || "ENTITY",
-          name: s?.name || s?.id || "Unknown",
-          color: getNodeColor(s?.label),
+          label: subjLabel,
+          name: subjName,
+          color: getNodeColor(subjLabel),
           isVectorMatch: vectorMatchIds.has(subjectId),
           score: vectorMatches.find((v) => v.id === subjectId)?.score,
         });
@@ -242,9 +285,9 @@ app.post("/api/query", async (req, res) => {
       if (!nodeMap.has(objectId)) {
         nodeMap.set(objectId, {
           id: objectId,
-          label: o?.label || "ENTITY",
-          name: o?.name || o?.id || "Unknown",
-          color: getNodeColor(o?.label),
+          label: objLabel,
+          name: objName,
+          color: getNodeColor(objLabel),
           isVectorMatch: vectorMatchIds.has(objectId),
           score: vectorMatches.find((v) => v.id === objectId)?.score,
         });

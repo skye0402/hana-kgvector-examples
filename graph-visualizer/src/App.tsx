@@ -61,6 +61,82 @@ function App() {
   const [result, setResult] = useState<QueryResponse | null>(null);
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
   const graphRef = useRef<any>(null);
+  const [pendingZoomToFit, setPendingZoomToFit] = useState(false);
+
+  const typeColorMapRef = useRef<Map<string, string>>(new Map());
+
+  const getTypeColor = useCallback((rawLabel: unknown): string => {
+    const label = String(rawLabel ?? "UNKNOWN").trim() || "UNKNOWN";
+    const cached = typeColorMapRef.current.get(label);
+    if (cached) return cached;
+
+    // Deterministic hash -> HSL -> hex
+    let hash = 0;
+    for (let i = 0; i < label.length; i++) {
+      hash = (hash * 31 + label.charCodeAt(i)) | 0;
+    }
+    const hue = Math.abs(hash) % 360;
+    const sat = 62;
+    const light = 52;
+
+    const hslToHex = (h: number, s: number, l: number) => {
+      s /= 100;
+      l /= 100;
+      const c = (1 - Math.abs(2 * l - 1)) * s;
+      const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+      const m = l - c / 2;
+      let r = 0;
+      let g = 0;
+      let b = 0;
+      if (h < 60) {
+        r = c;
+        g = x;
+      } else if (h < 120) {
+        r = x;
+        g = c;
+      } else if (h < 180) {
+        g = c;
+        b = x;
+      } else if (h < 240) {
+        g = x;
+        b = c;
+      } else if (h < 300) {
+        r = x;
+        b = c;
+      } else {
+        r = c;
+        b = x;
+      }
+      const toHex = (v: number) => Math.round((v + m) * 255).toString(16).padStart(2, "0");
+      return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+    };
+
+    const color = hslToHex(hue, sat, light);
+    typeColorMapRef.current.set(label, color);
+    return color;
+  }, []);
+
+  const legend = useMemo(() => {
+    const nodes = result?.graph?.nodes ?? [];
+    const labels = new Set<string>();
+    let hasVectorMatch = false;
+
+    for (const node of nodes) {
+      if (node?.isVectorMatch) hasVectorMatch = true;
+      const label = String(node?.label ?? "UNKNOWN").trim() || "UNKNOWN";
+      labels.add(label);
+    }
+
+    const items = Array.from(labels)
+      .sort((a, b) => a.localeCompare(b))
+      .map((label) => ({
+        label,
+        displayLabel: label === "UNKNOWN" ? "Unknown/Unclassified" : label,
+        color: getTypeColor(label),
+      }));
+
+    return { hasVectorMatch, items };
+  }, [result, getTypeColor]);
 
   const mainRef = useRef<HTMLDivElement | null>(null);
   const [leftWidthPct, setLeftWidthPct] = useState<number>(35);
@@ -141,7 +217,7 @@ function App() {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
     };
-  }, []);
+  }, [getTypeColor]);
 
   useEffect(() => {
     const el = graphContainerRef.current;
@@ -179,6 +255,7 @@ function App() {
       
       const data: QueryResponse = await response.json();
       setResult(data);
+      setPendingZoomToFit(true);
       
       // Center graph after data loads
       setTimeout(() => {
@@ -192,6 +269,26 @@ function App() {
       setLoading(false);
     }
   }, [query]);
+
+  const handleZoomIn = useCallback(() => {
+    const g = graphRef.current;
+    if (!g) return;
+    const k = g.zoom();
+    g.zoom(k * 1.2, 200);
+  }, []);
+
+  const handleZoomOut = useCallback(() => {
+    const g = graphRef.current;
+    if (!g) return;
+    const k = g.zoom();
+    g.zoom(k / 1.2, 200);
+  }, []);
+
+  const handleZoomToFit = useCallback(() => {
+    const g = graphRef.current;
+    if (!g) return;
+    g.zoomToFit(600, 60);
+  }, []);
 
   const handleKeyPress = useCallback((e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -216,7 +313,7 @@ function App() {
     // Draw node circle
     ctx.beginPath();
     ctx.arc(node.x!, node.y!, nodeSize, 0, 2 * Math.PI);
-    ctx.fillStyle = node.color;
+    ctx.fillStyle = getTypeColor(node.label);
     ctx.fill();
     
     // Draw highlight ring for vector matches
@@ -454,37 +551,64 @@ function App() {
                 nodeCanvasObject={nodeCanvasObject}
                 linkCanvasObject={linkCanvasObject}
                 onNodeClick={handleNodeClick}
+                onEngineStop={() => {
+                  if (!pendingZoomToFit) return;
+                  setPendingZoomToFit(false);
+                  if (graphRef.current) {
+                    graphRef.current.zoomToFit(700, 60);
+                  }
+                }}
                 nodeRelSize={6}
                 linkDirectionalArrowLength={0}
                 backgroundColor="#0f172a"
                 width={graphSize.width || undefined}
                 height={graphSize.height || undefined}
               />
+
+              <div className="absolute top-4 left-4 bg-slate-800/90 rounded-lg p-2 text-sm flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleZoomIn}
+                  className="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-100"
+                  title="Zoom in"
+                >
+                  +
+                </button>
+                <button
+                  type="button"
+                  onClick={handleZoomOut}
+                  className="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-100"
+                  title="Zoom out"
+                >
+                  −
+                </button>
+                <button
+                  type="button"
+                  onClick={handleZoomToFit}
+                  className="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-100"
+                  title="Fit graph to view"
+                >
+                  Fit
+                </button>
+              </div>
               
               {/* Legend */}
               <div className="absolute top-4 right-4 bg-slate-800/90 rounded-lg p-4 text-sm">
                 <h4 className="font-semibold text-white mb-2">Legend</h4>
                 <div className="space-y-1">
-                  <div className="flex items-center gap-2">
-                    <div className="w-3 h-3 rounded-full bg-yellow-400 ring-2 ring-yellow-400"></div>
-                    <span className="text-slate-300">Vector Match</span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <div className="w-3 h-3 rounded-full bg-blue-500"></div>
-                    <span className="text-slate-300">Organization</span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <div className="w-3 h-3 rounded-full bg-green-500"></div>
-                    <span className="text-slate-300">Product</span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <div className="w-3 h-3 rounded-full bg-purple-500"></div>
-                    <span className="text-slate-300">Service</span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <div className="w-3 h-3 rounded-full bg-orange-500"></div>
-                    <span className="text-slate-300">Technology</span>
-                  </div>
+                  {legend.hasVectorMatch && (
+                    <div className="flex items-center gap-2">
+                      <div className="w-3 h-3 rounded-full bg-yellow-400 ring-2 ring-yellow-400"></div>
+                      <span className="text-slate-300">Vector Match</span>
+                    </div>
+                  )}
+
+                  {legend.items.map((item) => (
+                    <div key={item.label} className="flex items-center gap-2">
+                      <div className="w-3 h-3 rounded-full" style={{ backgroundColor: item.color }}></div>
+                      <span className="text-slate-300">{item.displayLabel}</span>
+                    </div>
+                  ))}
                 </div>
               </div>
 
@@ -492,7 +616,7 @@ function App() {
               {selectedNode && (
                 <div className="absolute bottom-4 left-4 bg-slate-800/90 rounded-lg p-4 max-w-sm">
                   <h4 className="font-semibold text-white mb-2 flex items-center gap-2">
-                    <div className="w-3 h-3 rounded-full" style={{ backgroundColor: selectedNode.color }}></div>
+                    <div className="w-3 h-3 rounded-full" style={{ backgroundColor: getTypeColor(selectedNode.label) }}></div>
                     {selectedNode.name}
                   </h4>
                   <div className="text-sm text-slate-400 space-y-1">
