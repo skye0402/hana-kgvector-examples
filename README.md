@@ -6,6 +6,8 @@ This repository contains example applications demonstrating how to use [`hana-kg
 
 ### 📚 [Multi-Document Chat](./multi-doc-chat)
 
+![Multi-Document Chat Screenshot](docs/images/multi-doc-chat.png)
+
 A full-featured multi-document Q&A system with **image processing**:
 - Upload multiple PDFs into a unified knowledge graph
 - **Image extraction & VLM descriptions** - images become searchable text
@@ -21,6 +23,8 @@ A full-featured multi-document Q&A system with **image processing**:
 
 ### 🕸️ [Graph Visualizer](./graph-visualizer)
 
+![Graph Visualizer Screenshot](docs/images/visualizer.png)
+
 Interactive web UI to **visualize** your knowledge graph and query results:
 - Real-time graph visualization with force-directed layout
 - AI-powered answers with **inline image rendering**
@@ -34,6 +38,8 @@ Interactive web UI to **visualize** your knowledge graph and query results:
 ---
 
 ### 📄 [PDF Chat](./pdf-chat)
+
+![PDF Chat Screenshot](docs/images/pdf-chat.png)
 
 A simpler single-document Q&A system (no image processing):
 - PDF text extraction and chunking
