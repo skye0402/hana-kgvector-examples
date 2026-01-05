@@ -2,7 +2,7 @@
  * Database Inspection Tool for Multi-Doc Chat
  * 
  * This tool allows you to inspect the contents of the three main tables used:
- * 1. _NODES (Llama nodes / Text chunks)
+ * 1. _NODES (Document nodes / Text chunks)
  * 2. _VECTORS (KG entity embeddings)
  * 3. _IMAGES (Image BLOBs and descriptions)
  * 

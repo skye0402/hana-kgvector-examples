@@ -9,7 +9,7 @@
   },
   "dependencies": {
     "@sap/hana-client": "2.27.19",
-    "hana-kgvector": "^0.2.0",
+    "hana-kgvector": "^0.2.1",
     "openai": "^4.104.0",
     "pdf-parse": "^1.1.4",
     "zod": "^3.25.76"
