@@ -54,6 +54,13 @@ interface QueryResponse {
   };
 }
 
+interface GraphInfo {
+  graphName: string;
+  hasVectors: boolean;
+  hasNodes: boolean;
+  hasImages: boolean;
+}
+
 function App() {
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(false);
@@ -62,6 +69,9 @@ function App() {
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
   const graphRef = useRef<any>(null);
   const [pendingZoomToFit, setPendingZoomToFit] = useState(false);
+
+  const [availableGraphs, setAvailableGraphs] = useState<GraphInfo[]>([]);
+  const [selectedGraphName, setSelectedGraphName] = useState<string>('');
 
   const typeColorMapRef = useRef<Map<string, string>>(new Map());
 
@@ -220,6 +230,27 @@ function App() {
   }, [getTypeColor]);
 
   useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const resp = await fetch('/api/graphs');
+        if (!resp.ok) return;
+        const data = await resp.json();
+        if (cancelled) return;
+        const graphs = Array.isArray(data?.graphs) ? (data.graphs as GraphInfo[]) : [];
+        setAvailableGraphs(graphs);
+        const defaultName = String(data?.defaultGraphName ?? '').trim();
+        setSelectedGraphName((prev) => prev || defaultName || graphs?.[0]?.graphName || '');
+      } catch {
+        // ignore
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
     const el = graphContainerRef.current;
     if (!el || typeof ResizeObserver === "undefined") return;
 
@@ -245,7 +276,7 @@ function App() {
       const response = await fetch('/api/query', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: query.trim() }),
+        body: JSON.stringify({ query: query.trim(), graphName: selectedGraphName }),
       });
       
       if (!response.ok) {
@@ -268,7 +299,7 @@ function App() {
     } finally {
       setLoading(false);
     }
-  }, [query]);
+  }, [query, selectedGraphName]);
 
   const handleZoomIn = useCallback(() => {
     const g = graphRef.current;
@@ -394,6 +425,30 @@ function App() {
       {/* Query Input */}
       <div className="bg-slate-800 border-b border-slate-700 px-6 py-4">
         <div className="flex gap-4 max-w-4xl">
+          {selectedGraphName && (
+            <select
+              value={selectedGraphName}
+              onChange={(e) => {
+                setSelectedGraphName(e.target.value);
+                setResult(null);
+                setSelectedNode(null);
+                setError(null);
+              }}
+              className="px-3 py-3 bg-slate-700 border border-slate-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              disabled={loading}
+              title="Select graph"
+            >
+              {availableGraphs.length > 0
+                ? availableGraphs.map((g) => (
+                    <option key={g.graphName} value={g.graphName}>
+                      {g.graphName}{g.hasImages ? " (images)" : ""}
+                    </option>
+                  ))
+                : (
+                    <option value={selectedGraphName}>{selectedGraphName}</option>
+                  )}
+            </select>
+          )}
           <input
             type="text"
             value={query}

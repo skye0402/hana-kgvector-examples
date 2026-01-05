@@ -20,6 +20,8 @@ import {
   ImplicitPathExtractor,
   KG_SOURCE_REL,
   hanaExec,
+  listGraphs,
+  getGraphTables,
 } from "hana-kgvector";
 
 // Load config from multi-doc-chat
@@ -36,8 +38,7 @@ const IMAGES_DIR = path.resolve(__dirname, "../../multi-doc-chat/extracted_image
 app.use("/images", express.static(IMAGES_DIR));
 
 const PORT = process.env.PORT || 3001;
-const GRAPH_NAME = process.env.GRAPH_NAME || "MULTI_DOC_GRAPH";
-const IMAGE_TABLE_NAME = `${GRAPH_NAME}_IMAGES`;
+const DEFAULT_GRAPH_NAME = String(process.env.GRAPH_NAME || "MULTI_DOC_GRAPH").toUpperCase();
 const EMBEDDING_MODEL = process.env.DEFAULT_EMBEDDING_MODEL || "text-embedding-3-small";
 
 // Initialize OpenAI client
@@ -77,8 +78,10 @@ const embedModel = {
 
 // Store connection and index globally
 let conn: any = null;
-let graphStore: HanaPropertyGraphStore | null = null;
-let index: PropertyGraphIndex | null = null;
+const graphContextByName = new Map<
+  string,
+  { graphStore: HanaPropertyGraphStore; index: PropertyGraphIndex; graphName: string }
+>();
 
 async function initializeConnection() {
   console.log("🔌 Connecting to HANA Cloud...");
@@ -88,18 +91,28 @@ async function initializeConnection() {
     user: process.env.HANA_USER!,
     password: process.env.HANA_PASSWORD!,
   });
-  
-  graphStore = new HanaPropertyGraphStore(conn, { graphName: GRAPH_NAME });
-  index = new PropertyGraphIndex({
+
+  console.log("✅ Connected to HANA Cloud");
+  console.log(`   Default Graph: ${DEFAULT_GRAPH_NAME}`);
+  console.log(`   Images dir: ${IMAGES_DIR}`);
+}
+
+async function getGraphContext(graphName: string) {
+  const normalized = (String(graphName || "").trim() || DEFAULT_GRAPH_NAME).toUpperCase();
+  const cached = graphContextByName.get(normalized);
+  if (cached) return cached;
+
+  const graphStore = new HanaPropertyGraphStore(conn, { graphName: normalized });
+  const index = new PropertyGraphIndex({
     propertyGraphStore: graphStore,
     embedModel,
     kgExtractors: [new ImplicitPathExtractor()],
     embedKgNodes: false,
   });
-  
-  console.log("✅ Connected to HANA Cloud");
-  console.log(`   Graph: ${GRAPH_NAME}`);
-  console.log(`   Images dir: ${IMAGES_DIR}`);
+
+  const ctx = { graphStore, index, graphName: normalized };
+  graphContextByName.set(normalized, ctx);
+  return ctx;
 }
 
 // Entity type to color mapping
@@ -167,26 +180,42 @@ interface QueryResponse {
   };
 }
 
+app.get("/api/graphs", async (_req, res) => {
+  try {
+    if (!conn) return res.status(503).json({ error: "Database not connected" });
+    const graphs = await listGraphs(conn);
+    res.json({
+      defaultGraphName: DEFAULT_GRAPH_NAME,
+      graphs,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Query endpoint
 app.post("/api/query", async (req, res) => {
   try {
-    const { query } = req.body;
+    const { query, graphName } = req.body;
     
     if (!query || typeof query !== "string") {
       return res.status(400).json({ error: "Query is required" });
     }
     
-    if (!graphStore || !index) {
+    if (!conn) {
       return res.status(503).json({ error: "Database not connected" });
     }
-    
-    console.log(`\n🔍 Query: "${query}"`);
+
+    const ctx = await getGraphContext(String(graphName || DEFAULT_GRAPH_NAME));
+    const { imagesTable: imageTableName } = getGraphTables(ctx.graphName);
+
+    console.log(`\n🔍 Query: "${query}" (graph: ${ctx.graphName})`);
     
     // 1. Get query embedding
     const embedding = await embedModel.getTextEmbedding(query);
     
     // 2. Vector search for similar KG nodes
-    const [kgNodes, scores] = await graphStore.vectorQuery({
+    const [kgNodes, scores] = await ctx.graphStore.vectorQuery({
       queryEmbedding: embedding,
       similarityTopK: 5,
     });
@@ -201,7 +230,7 @@ app.post("/api/query", async (req, res) => {
     console.log(`   Vector matches: ${vectorMatches.length}`);
     
     // 3. Expand graph from matched nodes
-    const triplets = await graphStore.getRelMap({
+    const triplets = await ctx.graphStore.getRelMap({
       nodes: kgNodes || [],
       depth: 2,
       limit: 50,
@@ -240,7 +269,7 @@ app.post("/api/query", async (req, res) => {
       try {
         const rows: any = await hanaExec(
           conn,
-          `SELECT ID, LABEL, NAME FROM "${GRAPH_NAME}_VECTORS" WHERE ID IN (${inList})`
+          `SELECT ID, LABEL, NAME FROM "${getGraphTables(ctx.graphName).vectorsTable}" WHERE ID IN (${inList})`
         );
         for (const row of rows || []) {
           const id = String(row?.ID ?? "");
@@ -306,7 +335,7 @@ app.post("/api/query", async (req, res) => {
     console.log(`   Graph: ${nodes.length} nodes, ${links.length} edges`);
     
     // 5. Get answer from index (with structural edges for image retrieval)
-    const results = await index.query(query, {
+    const results = await ctx.index.query(query, {
       similarityTopK: 5,
       pathDepth: 2,
       limit: 30,
@@ -328,7 +357,7 @@ app.post("/api/query", async (req, res) => {
         let imagePath = meta.imagePath || "";
         try {
           const imgRows: any = await hanaExec(conn, 
-            `SELECT IMAGE_PATH FROM "${IMAGE_TABLE_NAME}" WHERE IMAGE_ID = '${meta.imageId}'`
+            `SELECT IMAGE_PATH FROM "${imageTableName}" WHERE IMAGE_ID = '${meta.imageId}'`
           );
           if (imgRows?.[0]?.IMAGE_PATH) {
             // Convert local path to URL path (e.g., extracted_images/DOC/img.png -> /images/DOC/img.png)
@@ -413,8 +442,8 @@ app.post("/api/query", async (req, res) => {
 // Health check
 app.get("/api/health", (req, res) => {
   res.json({ 
-    status: graphStore ? "connected" : "disconnected",
-    graph: GRAPH_NAME,
+    status: conn ? "connected" : "disconnected",
+    defaultGraphName: DEFAULT_GRAPH_NAME,
   });
 });
 
@@ -423,7 +452,7 @@ initializeConnection()
   .then(() => {
     app.listen(PORT, () => {
       console.log(`\n🚀 Server running at http://localhost:${PORT}`);
-      console.log(`   Graph: ${GRAPH_NAME}`);
+      console.log(`   Default Graph: ${DEFAULT_GRAPH_NAME}`);
     });
   })
   .catch((error) => {
