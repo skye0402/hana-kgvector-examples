@@ -331,7 +331,7 @@ app.post("/api/query", async (req, res) => {
         messages: [
           {
             role: "system",
-            content: "You are a helpful assistant that answers questions based only on the provided document context. When referring to images, include their ID (e.g., 'Image ID: xxx'). Be concise.",
+            content: "You are a helpful assistant that answers questions based only on the provided document context. Output MUST be GitHub-flavored Markdown (use headings, lists, and tables when appropriate). If you reference an image, embed it inline using Markdown image syntax with this exact URL format: ![<short human caption>](image:<IMAGE_ID>). Do not print raw IMAGE_IDs in the prose; only include them inside the (image:...) link. Be concise.",
           },
           {
             role: "user",

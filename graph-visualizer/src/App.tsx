@@ -62,6 +62,13 @@ function App() {
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
   const graphRef = useRef<any>(null);
 
+  const mainRef = useRef<HTMLDivElement | null>(null);
+  const [leftWidthPct, setLeftWidthPct] = useState<number>(35);
+  const draggingRef = useRef(false);
+
+  const graphContainerRef = useRef<HTMLDivElement | null>(null);
+  const [graphSize, setGraphSize] = useState<{ width: number; height: number }>({ width: 0, height: 0 });
+
   const markdownAnswer = useMemo(() => {
     if (!result?.answer) return "";
     const images = result.images ?? [];
@@ -84,6 +91,21 @@ function App() {
 
     let out = result.answer;
 
+    // Preferred format: ![caption](image:<IMAGE_ID>)
+    // Rewrite image:<id> to the actual served path (/images/...) so the prose can stay clean.
+    out = out.replace(/(!\[[^\]]*\]\()image:([A-Za-z0-9_.-]+)(\))/g, (match, pre, id, post) => {
+      const img = imageById.get(String(id));
+      if (!img?.imagePath) return match;
+      return `${String(pre)}${img.imagePath}${String(post)}`;
+    });
+
+    // Also support normal Markdown links: [something](image:<IMAGE_ID>)
+    out = out.replace(/(\]\()image:([A-Za-z0-9_.-]+)(\))/g, (match, pre, id, post) => {
+      const img = imageById.get(String(id));
+      if (!img?.imagePath) return match;
+      return `${String(pre)}${img.imagePath}${String(post)}`;
+    });
+
     out = out.replace(/Image ID:\s*([A-Za-z0-9_.-]+)/g, (match, id) => inject(match, String(id)));
 
     out = out.replace(/\(ID:\s*([A-Za-z0-9_.-]+)\)/g, (match, id, offset, full) => {
@@ -94,6 +116,47 @@ function App() {
 
     return out;
   }, [result]);
+
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      if (!draggingRef.current) return;
+      const el = mainRef.current;
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const pct = (x / rect.width) * 100;
+      const clamped = Math.max(22, Math.min(60, pct));
+      setLeftWidthPct(clamped);
+    };
+
+    const onUp = () => {
+      draggingRef.current = false;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, []);
+
+  useEffect(() => {
+    const el = graphContainerRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+
+    const ro = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      const cr = entry?.contentRect;
+      if (!cr) return;
+      setGraphSize({ width: Math.floor(cr.width), height: Math.floor(cr.height) });
+    });
+
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   const handleQuery = useCallback(async () => {
     if (!query.trim()) return;
@@ -273,9 +336,9 @@ function App() {
       </div>
 
       {/* Main Content */}
-      <div className="flex-1 flex overflow-hidden">
+      <div ref={mainRef} className="flex-1 flex overflow-hidden">
         {/* Left Panel - Answer */}
-        <div className="w-1/3 border-r border-slate-700 flex flex-col">
+        <div className="border-r border-slate-700 flex flex-col" style={{ width: `${leftWidthPct}%` }}>
           {/* Answer Section */}
           <div className="flex-1 p-6 overflow-auto">
             <h2 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
@@ -369,8 +432,20 @@ function App() {
           )}
         </div>
 
+        {/* Draggable Splitter */}
+        <div
+          className="bg-slate-700/60 hover:bg-slate-600 transition-colors"
+          style={{ width: 8, cursor: 'col-resize', flexShrink: 0, zIndex: 50 }}
+          onMouseDown={() => {
+            draggingRef.current = true;
+            document.body.style.cursor = 'col-resize';
+            document.body.style.userSelect = 'none';
+          }}
+          title="Drag to resize"
+        />
+
         {/* Right Panel - Graph */}
-        <div className="flex-1 relative bg-slate-950">
+        <div ref={graphContainerRef} className="flex-1 relative bg-slate-950 overflow-hidden">
           {result && result.graph.nodes.length > 0 ? (
             <>
               <ForceGraph2D
@@ -382,8 +457,8 @@ function App() {
                 nodeRelSize={6}
                 linkDirectionalArrowLength={0}
                 backgroundColor="#0f172a"
-                width={undefined}
-                height={undefined}
+                width={graphSize.width || undefined}
+                height={graphSize.height || undefined}
               />
               
               {/* Legend */}
