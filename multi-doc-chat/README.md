@@ -33,22 +33,32 @@ cd multi-doc-chat
 pnpm install
 ```
 
-Create `.env.local` (or copy from `pdf-chat`):
+Create `.env.local` from the example template:
+
+```bash
+cp .env.example .env.local
+# Edit .env.local with your credentials
+```
+
+Required environment variables:
 
 ```env
+# SAP HANA Cloud Connection
 HANA_HOST=your-instance.hanacloud.ondemand.com
 HANA_PORT=443
 HANA_USER=your-username
 HANA_PASSWORD=your-password
 
+# LLM API Configuration
 LITELLM_PROXY_URL=http://localhost:4000
 LITELLM_API_KEY=your-api-key
 
+# Model Configuration
 DEFAULT_EMBEDDING_MODEL=text-embedding-3-small
 DEFAULT_LLM_MODEL=gpt-4
 
-# Optional: override graph name (must match upload + chat + list)
-GRAPH_NAME=MULTI_DOC_GRAPH
+# Optional: Custom graph name (default: MULTI_DOC_GRAPH)
+# GRAPH_NAME=MULTI_DOC_GRAPH
 ```
 
 ## Usage
@@ -427,9 +437,33 @@ To disable image processing entirely, you can filter out images before processin
 - Ensure documents use consistent terminology
 - The unified schema helps, but entity resolution depends on LLM extraction
 
+## Diagnostic Tools
+
+The `tools/` directory contains helpful scripts for debugging and inspecting your knowledge graph:
+
+| Tool | Description |
+|------|-------------|
+| `pnpm inspect` | Inspect HANA tables (_NODES, _VECTORS, _IMAGES) |
+| `tsx tools/query-sparql.ts` | Query RDF graph directly, view structural relations |
+| `tsx tools/check-relations.ts` | Check entity and relation counts |
+| `tsx tools/list-tables.ts` | List all graph-related tables |
+
+**Example:**
+```bash
+# Inspect the vectors table
+pnpm inspect --table vectors --limit 10
+
+# Check structural edge counts
+tsx tools/query-sparql.ts
+```
+
+## Related Examples
+
+- **[Graph Visualizer](../graph-visualizer)**: Interactive web UI to visualize the knowledge graph and query results with image display
+- **[PDF Chat](../pdf-chat)**: Simpler single-document example without image processing
+
 ## Next Steps
 
 - **Add document versioning**: Track document versions and updates
 - **Implement incremental upload**: Add documents without re-processing existing ones
-- **Build a web UI**: Create a React frontend with document selection
 - **Add document similarity**: Find similar documents in the corpus

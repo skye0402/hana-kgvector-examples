@@ -57,25 +57,25 @@ Open http://localhost:5173 in your browser.
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    Graph Visualizer                          │
-├─────────────────────────────────────────────────────────────┤
+┌───────────────────────────────────────────────────────────────┐
+│                    Graph Visualizer                           │
+├───────────────────────────────────────────────────────────────┤
 │                                                               │
-│  Frontend (React + Vite)          Backend (Express)          │
-│  ┌──────────────────────┐        ┌──────────────────────┐   │
-│  │ Query Input          │        │ /api/query           │   │
-│  │ Answer Display       │◄──────►│ - Vector search      │   │
-│  │ Graph Visualization  │        │ - Graph expansion    │   │
-│  │ (react-force-graph)  │        │ - AI generation      │   │
-│  └──────────────────────┘        └──────────────────────┘   │
+│  Frontend (React + Vite)          Backend (Express)           │
+│  ┌──────────────────────┐        ┌──────────────────────┐     │
+│  │ Query Input          │        │ /api/query           │     │
+│  │ Answer Display       │◄──────►│ - Vector search      │     │
+│  │ Graph Visualization  │        │ - Graph expansion    │     │
+│  │ (react-force-graph)  │        │ - AI generation      │     │
+│  └──────────────────────┘        └──────────────────────┘     │
 │                                           │                   │
 └───────────────────────────────────────────┼───────────────────┘
                                             │
                                             ▼
-┌─────────────────────────────────────────────────────────────┐
-│                    SAP HANA Cloud                            │
-│  Knowledge Graph (pdf_documents) + Vector Engine             │
-└─────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────┐
+│                    SAP HANA Cloud                             │
+│  Knowledge Graph (MULTI_DOC_GRAPH) + Vector Engine            │
+└───────────────────────────────────────────────────────────────┘
 ```
 
 ## Graph Legend
@@ -138,3 +138,8 @@ Edit the `TYPE_COLORS` object in `server/index.ts` to customize entity type colo
 - Ensure extracted images exist in `multi-doc-chat/extracted_images/`
 - Check browser console for 404 errors on image paths
 - Verify the image table exists and has entries
+
+## Related Examples
+
+- **[Multi-Doc Chat](../multi-doc-chat)**: The backend data source - upload PDFs with image processing here first
+- **[PDF Chat](../pdf-chat)**: Simpler single-document example without image processing

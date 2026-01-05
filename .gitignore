@@ -6,3 +6,5 @@ dist
 pnpm-lock.yaml
 *.pdf
 extracted_images/
+*.code-workspace
+.vscode/
